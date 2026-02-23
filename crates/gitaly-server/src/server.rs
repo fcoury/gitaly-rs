@@ -9,8 +9,10 @@ use gitaly_proto::gitaly::blob_service_server::BlobServiceServer;
 use gitaly_proto::gitaly::commit_service_server::CommitServiceServer;
 use gitaly_proto::gitaly::diff_service_server::DiffServiceServer;
 use gitaly_proto::gitaly::hook_service_server::HookServiceServer;
+use gitaly_proto::gitaly::object_pool_service_server::ObjectPoolServiceServer;
 use gitaly_proto::gitaly::operation_service_server::OperationServiceServer;
 use gitaly_proto::gitaly::ref_service_server::RefServiceServer;
+use gitaly_proto::gitaly::remote_service_server::RemoteServiceServer;
 use gitaly_proto::gitaly::repository_service_server::RepositoryServiceServer;
 use gitaly_proto::gitaly::server_service_server::ServerServiceServer;
 use gitaly_proto::gitaly::smart_http_service_server::SmartHttpServiceServer;
@@ -25,8 +27,10 @@ use crate::service::blob::BlobServiceImpl;
 use crate::service::commit::CommitServiceImpl;
 use crate::service::diff::DiffServiceImpl;
 use crate::service::hook::HookServiceImpl;
+use crate::service::objectpool::ObjectPoolServiceImpl;
 use crate::service::operations::OperationServiceImpl;
 use crate::service::ref_::RefServiceImpl;
+use crate::service::remote::RemoteServiceImpl;
 use crate::service::repository::RepositoryServiceImpl;
 use crate::service::server::ServerServiceImpl;
 use crate::service::smarthttp::SmartHttpServiceImpl;
@@ -171,6 +175,14 @@ impl GitalyServer {
             ))
             .add_service(OperationServiceServer::with_interceptor(
                 OperationServiceImpl::new(Arc::clone(&dependencies)),
+                interceptor.clone(),
+            ))
+            .add_service(ObjectPoolServiceServer::with_interceptor(
+                ObjectPoolServiceImpl::new(Arc::clone(&dependencies)),
+                interceptor.clone(),
+            ))
+            .add_service(RemoteServiceServer::with_interceptor(
+                RemoteServiceImpl::new(Arc::clone(&dependencies)),
                 interceptor.clone(),
             ))
             .add_service(SmartHttpServiceServer::with_interceptor(

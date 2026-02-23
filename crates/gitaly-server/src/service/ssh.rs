@@ -1,7 +1,10 @@
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
+use std::process::Stdio;
 use std::sync::Arc;
 
+use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
@@ -85,6 +88,42 @@ where
     Response::new(Box::pin(tokio_stream::iter(vec![Ok(response)])))
 }
 
+async fn git_output_with_input<I, S>(
+    repo_path: &Path,
+    args: I,
+    stdin_payload: &[u8],
+) -> Result<std::process::Output, Status>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut command = Command::new("git");
+    command.arg("-C").arg(repo_path);
+    for arg in args {
+        command.arg(arg.as_ref());
+    }
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|err| Status::internal(format!("failed to spawn git command: {err}")))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(stdin_payload)
+            .await
+            .map_err(|err| Status::internal(format!("failed to write git stdin: {err}")))?;
+    }
+
+    child
+        .wait_with_output()
+        .await
+        .map_err(|err| Status::internal(format!("failed to await git command: {err}")))
+}
+
 fn unimplemented_ssh_rpc(method: &'static str) -> Status {
     Status::unimplemented(format!("SshService::{method} is not implemented"))
 }
@@ -103,9 +142,34 @@ impl SshService for SshServiceImpl {
 
     async fn ssh_receive_pack(
         &self,
-        _request: Request<tonic::Streaming<SshReceivePackRequest>>,
+        request: Request<tonic::Streaming<SshReceivePackRequest>>,
     ) -> Result<Response<Self::SSHReceivePackStream>, Status> {
-        Err(unimplemented_ssh_rpc("ssh_receive_pack"))
+        let mut stream = request.into_inner();
+        let mut repository_descriptor: Option<Repository> = None;
+        let mut stdin_payload = Vec::new();
+
+        while let Some(message) = stream.message().await.map_err(|err| {
+            Status::invalid_argument(format!("invalid receive-pack stream: {err}"))
+        })? {
+            if repository_descriptor.is_none() {
+                repository_descriptor = message.repository;
+            }
+            if !message.stdin.is_empty() {
+                stdin_payload.extend_from_slice(&message.stdin);
+            }
+        }
+
+        let repo_path = self.resolve_repo_path(repository_descriptor)?;
+        let output =
+            git_output_with_input(&repo_path, ["receive-pack", "."], &stdin_payload).await?;
+
+        Ok(build_stream_response(SshReceivePackResponse {
+            stdout: output.stdout,
+            stderr: output.stderr,
+            exit_status: Some(ExitStatus {
+                value: output.status.code().unwrap_or(1),
+            }),
+        }))
     }
 
     async fn ssh_upload_archive(
@@ -114,6 +178,7 @@ impl SshService for SshServiceImpl {
     ) -> Result<Response<Self::SSHUploadArchiveStream>, Status> {
         let mut stream = request.into_inner();
         let mut repository_descriptor: Option<Repository> = None;
+        let mut stdin_payload = Vec::new();
 
         while let Some(message) = stream
             .message()
@@ -121,16 +186,23 @@ impl SshService for SshServiceImpl {
             .map_err(|err| Status::invalid_argument(format!("invalid upload stream: {err}")))?
         {
             if repository_descriptor.is_none() {
-                repository_descriptor = message.repository.clone();
+                repository_descriptor = message.repository;
+            }
+            if !message.stdin.is_empty() {
+                stdin_payload.extend_from_slice(&message.stdin);
             }
         }
 
-        let _repo_path = self.resolve_repo_path(repository_descriptor)?;
+        let repo_path = self.resolve_repo_path(repository_descriptor)?;
+        let output =
+            git_output_with_input(&repo_path, ["upload-archive", "."], &stdin_payload).await?;
 
         Ok(build_stream_response(SshUploadArchiveResponse {
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-            exit_status: Some(ExitStatus { value: 0 }),
+            stdout: output.stdout,
+            stderr: output.stderr,
+            exit_status: Some(ExitStatus {
+                value: output.status.code().unwrap_or(1),
+            }),
         }))
     }
 }
@@ -219,36 +291,68 @@ mod tests {
             .expect_err("ssh_upload_pack_with_sidechannel should be unimplemented");
         assert_eq!(upload_pack_error.code(), Code::Unimplemented);
 
-        let receive_pack_stream = tokio_stream::iter(vec![SshReceivePackRequest::default()]);
-        let receive_pack_error = client
-            .ssh_receive_pack(receive_pack_stream)
-            .await
-            .expect_err("ssh_receive_pack should be unimplemented");
-        assert_eq!(receive_pack_error.code(), Code::Unimplemented);
-
         shutdown_server(shutdown_tx, server_task).await;
     }
 
     #[tokio::test]
-    async fn ssh_upload_archive_returns_single_exit_status_item() {
+    async fn ssh_receive_pack_returns_response_item_with_exit_status() {
         let (endpoint, shutdown_tx, server_task) =
             start_server(SshServiceImpl::new(test_dependencies())).await;
         let mut client = connect_client(endpoint).await;
 
         let request_stream = tokio_stream::iter(vec![
-            SshUploadArchiveRequest {
+            SshReceivePackRequest {
                 repository: Some(Repository {
                     storage_name: "default".to_string(),
                     relative_path: "group/project.git".to_string(),
                     ..Repository::default()
                 }),
                 stdin: Vec::new(),
+                ..SshReceivePackRequest::default()
             },
-            SshUploadArchiveRequest {
+            SshReceivePackRequest {
                 repository: None,
                 stdin: b"ignored".to_vec(),
+                ..SshReceivePackRequest::default()
             },
         ]);
+
+        let mut response_stream = client
+            .ssh_receive_pack(request_stream)
+            .await
+            .expect("ssh_receive_pack should succeed")
+            .into_inner();
+
+        let first_item = response_stream
+            .message()
+            .await
+            .expect("stream read should succeed")
+            .expect("expected first response item");
+        assert!(first_item.exit_status.is_some());
+
+        let second_item = response_stream
+            .message()
+            .await
+            .expect("stream read should succeed");
+        assert!(second_item.is_none());
+
+        shutdown_server(shutdown_tx, server_task).await;
+    }
+
+    #[tokio::test]
+    async fn ssh_upload_archive_returns_response_item_with_exit_status() {
+        let (endpoint, shutdown_tx, server_task) =
+            start_server(SshServiceImpl::new(test_dependencies())).await;
+        let mut client = connect_client(endpoint).await;
+
+        let request_stream = tokio_stream::iter(vec![SshUploadArchiveRequest {
+            repository: Some(Repository {
+                storage_name: "default".to_string(),
+                relative_path: "group/project.git".to_string(),
+                ..Repository::default()
+            }),
+            stdin: b"ignored".to_vec(),
+        }]);
 
         let mut response_stream = client
             .ssh_upload_archive(request_stream)
@@ -261,15 +365,29 @@ mod tests {
             .await
             .expect("stream read should succeed")
             .expect("expected first response item");
-        assert!(first_item.stdout.is_empty());
-        assert!(first_item.stderr.is_empty());
-        assert_eq!(first_item.exit_status.map(|status| status.value), Some(0));
+        assert!(first_item.exit_status.is_some());
 
         let second_item = response_stream
             .message()
             .await
             .expect("stream read should succeed");
         assert!(second_item.is_none());
+
+        shutdown_server(shutdown_tx, server_task).await;
+    }
+
+    #[tokio::test]
+    async fn ssh_receive_pack_requires_repository() {
+        let (endpoint, shutdown_tx, server_task) =
+            start_server(SshServiceImpl::new(test_dependencies())).await;
+        let mut client = connect_client(endpoint).await;
+
+        let receive_pack_stream = tokio_stream::iter(vec![SshReceivePackRequest::default()]);
+        let status = client
+            .ssh_receive_pack(receive_pack_stream)
+            .await
+            .expect_err("missing repository should fail");
+        assert_eq!(status.code(), Code::InvalidArgument);
 
         shutdown_server(shutdown_tx, server_task).await;
     }

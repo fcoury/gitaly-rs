@@ -5,12 +5,15 @@ use tonic::transport::server::Router;
 use gitaly_cgroups::{CgroupConfig, CgroupManagerError};
 use gitaly_config::RuntimeConfig;
 use gitaly_limiter::concurrency::ConcurrencyLimiter;
+use gitaly_proto::gitaly::analysis_service_server::AnalysisServiceServer;
 use gitaly_proto::gitaly::blob_service_server::BlobServiceServer;
+use gitaly_proto::gitaly::cleanup_service_server::CleanupServiceServer;
 use gitaly_proto::gitaly::commit_service_server::CommitServiceServer;
 use gitaly_proto::gitaly::diff_service_server::DiffServiceServer;
 use gitaly_proto::gitaly::hook_service_server::HookServiceServer;
 use gitaly_proto::gitaly::object_pool_service_server::ObjectPoolServiceServer;
 use gitaly_proto::gitaly::operation_service_server::OperationServiceServer;
+use gitaly_proto::gitaly::partition_service_server::PartitionServiceServer;
 use gitaly_proto::gitaly::ref_service_server::RefServiceServer;
 use gitaly_proto::gitaly::remote_service_server::RemoteServiceServer;
 use gitaly_proto::gitaly::repository_service_server::RepositoryServiceServer;
@@ -23,12 +26,15 @@ use crate::dependencies::Dependencies;
 use crate::middleware;
 use crate::middleware::MiddlewareContext;
 use crate::runtime::RuntimePaths;
+use crate::service::analysis::AnalysisServiceImpl;
 use crate::service::blob::BlobServiceImpl;
+use crate::service::cleanup::CleanupServiceImpl;
 use crate::service::commit::CommitServiceImpl;
 use crate::service::diff::DiffServiceImpl;
 use crate::service::hook::HookServiceImpl;
 use crate::service::objectpool::ObjectPoolServiceImpl;
 use crate::service::operations::OperationServiceImpl;
+use crate::service::partition::PartitionServiceImpl;
 use crate::service::ref_::RefServiceImpl;
 use crate::service::remote::RemoteServiceImpl;
 use crate::service::repository::RepositoryServiceImpl;
@@ -183,6 +189,18 @@ impl GitalyServer {
             ))
             .add_service(RemoteServiceServer::with_interceptor(
                 RemoteServiceImpl::new(Arc::clone(&dependencies)),
+                interceptor.clone(),
+            ))
+            .add_service(CleanupServiceServer::with_interceptor(
+                CleanupServiceImpl::new(Arc::clone(&dependencies)),
+                interceptor.clone(),
+            ))
+            .add_service(AnalysisServiceServer::with_interceptor(
+                AnalysisServiceImpl::new(Arc::clone(&dependencies)),
+                interceptor.clone(),
+            ))
+            .add_service(PartitionServiceServer::with_interceptor(
+                PartitionServiceImpl::new(Arc::clone(&dependencies)),
                 interceptor.clone(),
             ))
             .add_service(SmartHttpServiceServer::with_interceptor(

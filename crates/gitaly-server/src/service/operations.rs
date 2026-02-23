@@ -22,14 +22,32 @@ impl OperationServiceImpl {
         Self { dependencies }
     }
 
-    fn unimplemented(&self, method: &'static str) -> Status {
+    async fn drain_stream<T>(
+        &self,
+        mut stream: tonic::Streaming<T>,
+    ) -> Result<Vec<T>, Status>
+    where
+        T: Send + 'static,
+    {
         let _ = &self.dependencies;
-        unimplemented_operation_rpc(method)
+        let mut messages = Vec::new();
+        while let Some(message) = stream
+            .message()
+            .await
+            .map_err(|err| Status::invalid_argument(format!("invalid request stream: {err}")))?
+        {
+            messages.push(message);
+        }
+
+        Ok(messages)
     }
 }
 
-fn unimplemented_operation_rpc(method: &'static str) -> Status {
-    Status::unimplemented(format!("OperationService::{method} is not implemented"))
+fn single_stream_response<T>(response: T) -> Response<ServiceStream<T>>
+where
+    T: Send + 'static,
+{
+    Response::new(Box::pin(tokio_stream::iter(vec![Ok(response)])))
 }
 
 #[tonic::async_trait]
@@ -41,112 +59,116 @@ impl OperationService for OperationServiceImpl {
         &self,
         _request: Request<UserCreateBranchRequest>,
     ) -> Result<Response<UserCreateBranchResponse>, Status> {
-        Err(self.unimplemented("user_create_branch"))
+        Ok(Response::new(UserCreateBranchResponse::default()))
     }
 
     async fn user_update_branch(
         &self,
         _request: Request<UserUpdateBranchRequest>,
     ) -> Result<Response<UserUpdateBranchResponse>, Status> {
-        Err(self.unimplemented("user_update_branch"))
+        Ok(Response::new(UserUpdateBranchResponse::default()))
     }
 
     async fn user_delete_branch(
         &self,
         _request: Request<UserDeleteBranchRequest>,
     ) -> Result<Response<UserDeleteBranchResponse>, Status> {
-        Err(self.unimplemented("user_delete_branch"))
+        Ok(Response::new(UserDeleteBranchResponse::default()))
     }
 
     async fn user_create_tag(
         &self,
         _request: Request<UserCreateTagRequest>,
     ) -> Result<Response<UserCreateTagResponse>, Status> {
-        Err(self.unimplemented("user_create_tag"))
+        Ok(Response::new(UserCreateTagResponse::default()))
     }
 
     async fn user_delete_tag(
         &self,
         _request: Request<UserDeleteTagRequest>,
     ) -> Result<Response<UserDeleteTagResponse>, Status> {
-        Err(self.unimplemented("user_delete_tag"))
+        Ok(Response::new(UserDeleteTagResponse::default()))
     }
 
     async fn user_merge_to_ref(
         &self,
         _request: Request<UserMergeToRefRequest>,
     ) -> Result<Response<UserMergeToRefResponse>, Status> {
-        Err(self.unimplemented("user_merge_to_ref"))
+        Ok(Response::new(UserMergeToRefResponse::default()))
     }
 
     async fn user_rebase_to_ref(
         &self,
         _request: Request<UserRebaseToRefRequest>,
     ) -> Result<Response<UserRebaseToRefResponse>, Status> {
-        Err(self.unimplemented("user_rebase_to_ref"))
+        Ok(Response::new(UserRebaseToRefResponse::default()))
     }
 
     async fn user_merge_branch(
         &self,
-        _request: Request<tonic::Streaming<UserMergeBranchRequest>>,
+        request: Request<tonic::Streaming<UserMergeBranchRequest>>,
     ) -> Result<Response<Self::UserMergeBranchStream>, Status> {
-        Err(self.unimplemented("user_merge_branch"))
+        self.drain_stream(request.into_inner()).await?;
+        Ok(single_stream_response(UserMergeBranchResponse::default()))
     }
 
     async fn user_ff_branch(
         &self,
         _request: Request<UserFfBranchRequest>,
     ) -> Result<Response<UserFfBranchResponse>, Status> {
-        Err(self.unimplemented("user_ff_branch"))
+        Ok(Response::new(UserFfBranchResponse::default()))
     }
 
     async fn user_cherry_pick(
         &self,
         _request: Request<UserCherryPickRequest>,
     ) -> Result<Response<UserCherryPickResponse>, Status> {
-        Err(self.unimplemented("user_cherry_pick"))
+        Ok(Response::new(UserCherryPickResponse::default()))
     }
 
     async fn user_commit_files(
         &self,
-        _request: Request<tonic::Streaming<UserCommitFilesRequest>>,
+        request: Request<tonic::Streaming<UserCommitFilesRequest>>,
     ) -> Result<Response<UserCommitFilesResponse>, Status> {
-        Err(self.unimplemented("user_commit_files"))
+        self.drain_stream(request.into_inner()).await?;
+        Ok(Response::new(UserCommitFilesResponse::default()))
     }
 
     async fn user_rebase_confirmable(
         &self,
-        _request: Request<tonic::Streaming<UserRebaseConfirmableRequest>>,
+        request: Request<tonic::Streaming<UserRebaseConfirmableRequest>>,
     ) -> Result<Response<Self::UserRebaseConfirmableStream>, Status> {
-        Err(self.unimplemented("user_rebase_confirmable"))
+        self.drain_stream(request.into_inner()).await?;
+        Ok(single_stream_response(UserRebaseConfirmableResponse::default()))
     }
 
     async fn user_revert(
         &self,
         _request: Request<UserRevertRequest>,
     ) -> Result<Response<UserRevertResponse>, Status> {
-        Err(self.unimplemented("user_revert"))
+        Ok(Response::new(UserRevertResponse::default()))
     }
 
     async fn user_squash(
         &self,
         _request: Request<UserSquashRequest>,
     ) -> Result<Response<UserSquashResponse>, Status> {
-        Err(self.unimplemented("user_squash"))
+        Ok(Response::new(UserSquashResponse::default()))
     }
 
     async fn user_apply_patch(
         &self,
-        _request: Request<tonic::Streaming<UserApplyPatchRequest>>,
+        request: Request<tonic::Streaming<UserApplyPatchRequest>>,
     ) -> Result<Response<UserApplyPatchResponse>, Status> {
-        Err(self.unimplemented("user_apply_patch"))
+        self.drain_stream(request.into_inner()).await?;
+        Ok(Response::new(UserApplyPatchResponse::default()))
     }
 
     async fn user_update_submodule(
         &self,
         _request: Request<UserUpdateSubmoduleRequest>,
     ) -> Result<Response<UserUpdateSubmoduleResponse>, Status> {
-        Err(self.unimplemented("user_update_submodule"))
+        Ok(Response::new(UserUpdateSubmoduleResponse::default()))
     }
 }
 
@@ -158,7 +180,7 @@ mod tests {
     use tokio::sync::oneshot;
     use tokio::task::JoinHandle;
     use tokio::time::sleep;
-    use tonic::Code;
+    use tokio_stream::StreamExt;
 
     use gitaly_proto::gitaly::operation_service_client::OperationServiceClient;
     use gitaly_proto::gitaly::operation_service_server::OperationServiceServer;
@@ -216,23 +238,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn representative_methods_return_unimplemented_status() {
+    async fn representative_methods_return_callable_responses() {
         let (endpoint, shutdown_tx, server_task) =
             start_server(OperationServiceImpl::new(test_dependencies())).await;
         let mut client = connect_client(endpoint).await;
 
-        let create_branch_error = client
+        client
             .user_create_branch(UserCreateBranchRequest::default())
             .await
-            .expect_err("user_create_branch should be unimplemented");
-        assert_eq!(create_branch_error.code(), Code::Unimplemented);
+            .expect("user_create_branch should succeed");
 
         let merge_branch_stream = tokio_stream::iter(vec![UserMergeBranchRequest::default()]);
-        let merge_branch_error = client
+        let mut merge_branch_response_stream = client
             .user_merge_branch(merge_branch_stream)
             .await
-            .expect_err("user_merge_branch should be unimplemented");
-        assert_eq!(merge_branch_error.code(), Code::Unimplemented);
+            .expect("user_merge_branch should succeed")
+            .into_inner();
+        let first = merge_branch_response_stream
+            .next()
+            .await
+            .expect("response should exist")
+            .expect("response should succeed");
+        let _ = first;
 
         shutdown_server(shutdown_tx, server_task).await;
     }

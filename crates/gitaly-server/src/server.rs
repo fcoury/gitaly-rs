@@ -11,6 +11,8 @@ use gitaly_proto::gitaly::diff_service_server::DiffServiceServer;
 use gitaly_proto::gitaly::ref_service_server::RefServiceServer;
 use gitaly_proto::gitaly::repository_service_server::RepositoryServiceServer;
 use gitaly_proto::gitaly::server_service_server::ServerServiceServer;
+use gitaly_proto::gitaly::smart_http_service_server::SmartHttpServiceServer;
+use gitaly_proto::gitaly::ssh_service_server::SshServiceServer;
 use thiserror::Error;
 
 use crate::dependencies::Dependencies;
@@ -23,6 +25,8 @@ use crate::service::diff::DiffServiceImpl;
 use crate::service::ref_::RefServiceImpl;
 use crate::service::repository::RepositoryServiceImpl;
 use crate::service::server::ServerServiceImpl;
+use crate::service::smarthttp::SmartHttpServiceImpl;
+use crate::service::ssh::SshServiceImpl;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct GitalyServer;
@@ -155,6 +159,14 @@ impl GitalyServer {
             ))
             .add_service(DiffServiceServer::with_interceptor(
                 DiffServiceImpl::new(Arc::clone(&dependencies)),
+                interceptor.clone(),
+            ))
+            .add_service(SmartHttpServiceServer::with_interceptor(
+                SmartHttpServiceImpl::new(Arc::clone(&dependencies)),
+                interceptor.clone(),
+            ))
+            .add_service(SshServiceServer::with_interceptor(
+                SshServiceImpl::new(Arc::clone(&dependencies)),
                 interceptor.clone(),
             ))
             .add_service(RefServiceServer::with_interceptor(

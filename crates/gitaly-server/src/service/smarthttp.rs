@@ -1,0 +1,306 @@
+use std::path::{Component, Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
+
+use tokio::process::Command;
+use tokio_stream::Stream;
+use tonic::{Request, Response, Status};
+
+use gitaly_proto::gitaly::smart_http_service_server::SmartHttpService;
+use gitaly_proto::gitaly::*;
+
+use crate::dependencies::Dependencies;
+
+type ServiceStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
+
+const STREAM_CHUNK_SIZE: usize = 32 * 1024;
+
+#[derive(Debug, Clone)]
+pub struct SmartHttpServiceImpl {
+    dependencies: Arc<Dependencies>,
+}
+
+impl SmartHttpServiceImpl {
+    #[must_use]
+    pub fn new(dependencies: Arc<Dependencies>) -> Self {
+        Self { dependencies }
+    }
+
+    fn resolve_repo_path(&self, repository: Option<Repository>) -> Result<PathBuf, Status> {
+        let repository =
+            repository.ok_or_else(|| Status::invalid_argument("repository is required"))?;
+
+        if repository.storage_name.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "repository.storage_name is required",
+            ));
+        }
+
+        if repository.relative_path.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "repository.relative_path is required",
+            ));
+        }
+
+        validate_relative_path(&repository.relative_path)?;
+
+        let storage_root = self
+            .dependencies
+            .storage_paths
+            .get(&repository.storage_name)
+            .ok_or_else(|| {
+                Status::not_found(format!(
+                    "storage `{}` is not configured",
+                    repository.storage_name
+                ))
+            })?;
+
+        Ok(storage_root.join(repository.relative_path))
+    }
+}
+
+fn validate_relative_path(relative_path: &str) -> Result<(), Status> {
+    let path = Path::new(relative_path);
+    if path.is_absolute() {
+        return Err(Status::invalid_argument(
+            "repository.relative_path must be relative",
+        ));
+    }
+
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => {}
+            _ => {
+                return Err(Status::invalid_argument(
+                    "repository.relative_path contains disallowed path components",
+                ))
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn stream_from_values<T>(values: Vec<T>) -> Response<ServiceStream<T>>
+where
+    T: Send + 'static,
+{
+    let items = values.into_iter().map(Ok);
+    Response::new(Box::pin(tokio_stream::iter(items)))
+}
+
+fn stream_bytes<T, F>(data: Vec<u8>, mut map: F) -> Response<ServiceStream<T>>
+where
+    T: Send + 'static,
+    F: FnMut(Vec<u8>) -> T,
+{
+    let chunks: Vec<T> = if data.is_empty() {
+        vec![map(Vec::new())]
+    } else {
+        data.chunks(STREAM_CHUNK_SIZE)
+            .map(|chunk| map(chunk.to_vec()))
+            .collect()
+    };
+
+    stream_from_values(chunks)
+}
+
+async fn git_output<I, S>(repo_path: &Path, args: I) -> Result<std::process::Output, Status>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut command = Command::new("git");
+    command.arg("-C").arg(repo_path);
+    for arg in args {
+        command.arg(arg.as_ref());
+    }
+
+    command
+        .output()
+        .await
+        .map_err(|err| Status::internal(format!("failed to execute git command: {err}")))
+}
+
+fn status_for_git_failure(args: &str, output: &std::process::Output) -> Status {
+    Status::internal(format!(
+        "git command failed: git {args}; stderr: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+fn unimplemented_smart_http_rpc(method: &str) -> Status {
+    Status::unimplemented(format!("SmartHttpService::{method} is not implemented"))
+}
+
+#[tonic::async_trait]
+impl SmartHttpService for SmartHttpServiceImpl {
+    type InfoRefsUploadPackStream = ServiceStream<InfoRefsResponse>;
+    type InfoRefsReceivePackStream = ServiceStream<InfoRefsResponse>;
+    type PostReceivePackStream = ServiceStream<PostReceivePackResponse>;
+
+    async fn info_refs_upload_pack(
+        &self,
+        request: Request<InfoRefsRequest>,
+    ) -> Result<Response<Self::InfoRefsUploadPackStream>, Status> {
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+
+        let output = git_output(
+            &repo_path,
+            ["upload-pack", "--stateless-rpc", "--advertise-refs", "."],
+        )
+        .await?;
+
+        if !output.status.success() {
+            return Err(status_for_git_failure(
+                "-C <repo> upload-pack --stateless-rpc --advertise-refs .",
+                &output,
+            ));
+        }
+
+        Ok(stream_bytes(output.stdout, |data| InfoRefsResponse {
+            data,
+        }))
+    }
+
+    async fn info_refs_receive_pack(
+        &self,
+        request: Request<InfoRefsRequest>,
+    ) -> Result<Response<Self::InfoRefsReceivePackStream>, Status> {
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+
+        let output = git_output(
+            &repo_path,
+            ["receive-pack", "--stateless-rpc", "--advertise-refs", "."],
+        )
+        .await?;
+
+        if !output.status.success() {
+            return Err(status_for_git_failure(
+                "-C <repo> receive-pack --stateless-rpc --advertise-refs .",
+                &output,
+            ));
+        }
+
+        Ok(stream_bytes(output.stdout, |data| InfoRefsResponse {
+            data,
+        }))
+    }
+
+    async fn post_upload_pack_with_sidechannel(
+        &self,
+        _request: Request<PostUploadPackWithSidechannelRequest>,
+    ) -> Result<Response<PostUploadPackWithSidechannelResponse>, Status> {
+        Err(unimplemented_smart_http_rpc(
+            "post_upload_pack_with_sidechannel",
+        ))
+    }
+
+    async fn post_receive_pack(
+        &self,
+        _request: Request<tonic::Streaming<PostReceivePackRequest>>,
+    ) -> Result<Response<Self::PostReceivePackStream>, Status> {
+        Err(unimplemented_smart_http_rpc("post_receive_pack"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::HashMap;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use tokio_stream::StreamExt;
+
+    fn unique_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock drift")
+            .as_nanos();
+        std::env::temp_dir().join(format!("gitaly-rs-{name}-{nanos}"))
+    }
+
+    fn run_git(repo_path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(args)
+            .output()
+            .expect("git should execute");
+        assert!(
+            output.status.success(),
+            "git -C {} {} failed\nstdout: {}\nstderr: {}",
+            repo_path.display(),
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn info_refs_upload_pack_stream_contains_heads_ref() {
+        let storage_root = unique_dir("smarthttp-service");
+        let repo_path = storage_root.join("project.git");
+
+        std::fs::create_dir_all(&storage_root).expect("storage root should be creatable");
+        std::fs::create_dir_all(&repo_path).expect("repo path should be creatable");
+
+        run_git(&repo_path, &["init", "--quiet"]);
+        run_git(
+            &repo_path,
+            &["config", "user.name", "SmartHTTP Service Tests"],
+        );
+        run_git(
+            &repo_path,
+            &[
+                "config",
+                "user.email",
+                "smarthttp-service-tests@example.com",
+            ],
+        );
+        std::fs::write(repo_path.join("README.md"), b"hello\n").expect("README should write");
+        run_git(&repo_path, &["add", "README.md"]);
+        run_git(&repo_path, &["commit", "--quiet", "-m", "initial"]);
+
+        let mut storage_paths = HashMap::new();
+        storage_paths.insert("default".to_string(), storage_root.clone());
+
+        let dependencies = Arc::new(Dependencies::default().with_storage_paths(storage_paths));
+        let service = SmartHttpServiceImpl::new(dependencies);
+
+        let repository = Repository {
+            storage_name: "default".to_string(),
+            relative_path: "project.git".to_string(),
+            ..Repository::default()
+        };
+
+        let mut stream = service
+            .info_refs_upload_pack(Request::new(InfoRefsRequest {
+                repository: Some(repository),
+                ..InfoRefsRequest::default()
+            }))
+            .await
+            .expect("info_refs_upload_pack should succeed")
+            .into_inner();
+
+        let mut data = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.expect("stream chunk should not error");
+            data.extend(chunk.data);
+        }
+
+        assert!(
+            data.windows(b"refs/heads/".len())
+                .any(|window| window == b"refs/heads/"),
+            "advertised refs should include a heads reference"
+        );
+
+        if storage_root.exists() {
+            std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
+        }
+    }
+}

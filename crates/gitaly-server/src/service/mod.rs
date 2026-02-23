@@ -4,3 +4,5 @@ pub mod diff;
 pub mod ref_;
 pub mod repository;
 pub mod server;
+pub mod smarthttp;
+pub mod ssh;

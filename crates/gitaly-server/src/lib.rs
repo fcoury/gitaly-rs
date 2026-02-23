@@ -13,3 +13,5 @@ pub use service::diff::DiffServiceImpl;
 pub use service::ref_::RefServiceImpl;
 pub use service::repository::RepositoryServiceImpl;
 pub use service::server::ServerServiceImpl;
+pub use service::smarthttp::SmartHttpServiceImpl;
+pub use service::ssh::SshServiceImpl;

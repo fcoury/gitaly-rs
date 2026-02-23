@@ -5,7 +5,9 @@ use tonic::transport::server::Router;
 use gitaly_cgroups::{CgroupConfig, CgroupManagerError};
 use gitaly_config::RuntimeConfig;
 use gitaly_limiter::concurrency::ConcurrencyLimiter;
+use gitaly_proto::gitaly::blob_service_server::BlobServiceServer;
 use gitaly_proto::gitaly::commit_service_server::CommitServiceServer;
+use gitaly_proto::gitaly::diff_service_server::DiffServiceServer;
 use gitaly_proto::gitaly::ref_service_server::RefServiceServer;
 use gitaly_proto::gitaly::repository_service_server::RepositoryServiceServer;
 use gitaly_proto::gitaly::server_service_server::ServerServiceServer;
@@ -15,7 +17,9 @@ use crate::dependencies::Dependencies;
 use crate::middleware;
 use crate::middleware::MiddlewareContext;
 use crate::runtime::RuntimePaths;
+use crate::service::blob::BlobServiceImpl;
 use crate::service::commit::CommitServiceImpl;
+use crate::service::diff::DiffServiceImpl;
 use crate::service::ref_::RefServiceImpl;
 use crate::service::repository::RepositoryServiceImpl;
 use crate::service::server::ServerServiceImpl;
@@ -143,6 +147,14 @@ impl GitalyServer {
             ))
             .add_service(CommitServiceServer::with_interceptor(
                 CommitServiceImpl::new(Arc::clone(&dependencies)),
+                interceptor.clone(),
+            ))
+            .add_service(BlobServiceServer::with_interceptor(
+                BlobServiceImpl::new(Arc::clone(&dependencies)),
+                interceptor.clone(),
+            ))
+            .add_service(DiffServiceServer::with_interceptor(
+                DiffServiceImpl::new(Arc::clone(&dependencies)),
                 interceptor.clone(),
             ))
             .add_service(RefServiceServer::with_interceptor(

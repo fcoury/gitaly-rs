@@ -8,6 +8,14 @@ pub mod gitaly {
 #[cfg(not(gitaly_proto_codegen))]
 pub mod gitaly {}
 
+#[cfg(gitaly_proto_codegen)]
+pub mod raftpb {
+    tonic::include_proto!("raftpb");
+}
+
+#[cfg(not(gitaly_proto_codegen))]
+pub mod raftpb {}
+
 pub mod registry {
     use std::collections::{HashMap, HashSet};
 

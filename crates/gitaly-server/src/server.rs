@@ -14,6 +14,7 @@ use gitaly_proto::gitaly::hook_service_server::HookServiceServer;
 use gitaly_proto::gitaly::object_pool_service_server::ObjectPoolServiceServer;
 use gitaly_proto::gitaly::operation_service_server::OperationServiceServer;
 use gitaly_proto::gitaly::partition_service_server::PartitionServiceServer;
+use gitaly_proto::gitaly::raft_service_server::RaftServiceServer;
 use gitaly_proto::gitaly::ref_service_server::RefServiceServer;
 use gitaly_proto::gitaly::remote_service_server::RemoteServiceServer;
 use gitaly_proto::gitaly::repository_service_server::RepositoryServiceServer;
@@ -35,6 +36,7 @@ use crate::service::hook::HookServiceImpl;
 use crate::service::objectpool::ObjectPoolServiceImpl;
 use crate::service::operations::OperationServiceImpl;
 use crate::service::partition::PartitionServiceImpl;
+use crate::service::raft::RaftServiceImpl;
 use crate::service::ref_::RefServiceImpl;
 use crate::service::remote::RemoteServiceImpl;
 use crate::service::repository::RepositoryServiceImpl;
@@ -201,6 +203,10 @@ impl GitalyServer {
             ))
             .add_service(PartitionServiceServer::with_interceptor(
                 PartitionServiceImpl::new(Arc::clone(&dependencies)),
+                interceptor.clone(),
+            ))
+            .add_service(RaftServiceServer::with_interceptor(
+                RaftServiceImpl::new(Arc::clone(&dependencies)),
                 interceptor.clone(),
             ))
             .add_service(SmartHttpServiceServer::with_interceptor(

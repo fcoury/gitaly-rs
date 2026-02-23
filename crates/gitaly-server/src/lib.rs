@@ -18,6 +18,7 @@ pub use service::hook::HookServiceImpl;
 pub use service::objectpool::ObjectPoolServiceImpl;
 pub use service::operations::OperationServiceImpl;
 pub use service::partition::PartitionServiceImpl;
+pub use service::raft::RaftServiceImpl;
 pub use service::ref_::RefServiceImpl;
 pub use service::remote::RemoteServiceImpl;
 pub use service::repository::RepositoryServiceImpl;

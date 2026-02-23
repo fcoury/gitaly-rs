@@ -33,9 +33,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let proto_root = crate_dir.join("../../..").join("proto").canonicalize()?;
+    let workspace_proto_root = crate_dir.join("../..").join("proto");
+    let local_proto_root = workspace_proto_root
+        .exists()
+        .then(|| workspace_proto_root.canonicalize())
+        .transpose()?;
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
 
     println!("cargo:rerun-if-changed={}", proto_root.display());
+    if let Some(local_proto_root) = &local_proto_root {
+        println!("cargo:rerun-if-changed={}", local_proto_root.display());
+    }
 
     let mut protos = std::fs::read_dir(&proto_root)?
         .filter_map(Result::ok)
@@ -44,7 +52,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect::<Vec<_>>();
     protos.sort();
 
-    if !proto_root.join("raftpb/raft.proto").exists() {
+    let has_raft_proto = proto_root.join("raftpb/raft.proto").exists()
+        || local_proto_root
+            .as_ref()
+            .is_some_and(|local_root| local_root.join("raftpb/raft.proto").exists());
+
+    if !has_raft_proto {
         protos.retain(|path| path.file_name() != Some(OsStr::new("cluster.proto")));
         println!(
             "cargo:warning=Skipping `cluster.proto`: missing dependency `proto/raftpb/raft.proto`"
@@ -63,10 +76,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (registry_entries, intercepted_methods) = build_registry(&protos)?;
     generate_registry_source(&out_dir, &registry_entries, &intercepted_methods)?;
 
+    let mut include_paths = vec![proto_root.clone()];
+    if let Some(local_proto_root) = &local_proto_root {
+        if local_proto_root != &proto_root {
+            include_paths.push(local_proto_root.clone());
+        }
+    }
+
     match tonic_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile_protos(&protos, &[proto_root.clone()])
+        .compile_protos(&protos, &include_paths)
     {
         Ok(()) => {
             println!("cargo:rustc-cfg=gitaly_proto_codegen");

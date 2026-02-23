@@ -7,6 +7,7 @@ pub mod hook;
 pub mod objectpool;
 pub mod operations;
 pub mod partition;
+pub mod raft;
 pub mod ref_;
 pub mod remote;
 pub mod repository;

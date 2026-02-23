@@ -2,6 +2,7 @@ pub mod blob;
 pub mod commit;
 pub mod diff;
 pub mod hook;
+pub mod operations;
 pub mod ref_;
 pub mod repository;
 pub mod server;

@@ -9,6 +9,7 @@ use gitaly_proto::gitaly::blob_service_server::BlobServiceServer;
 use gitaly_proto::gitaly::commit_service_server::CommitServiceServer;
 use gitaly_proto::gitaly::diff_service_server::DiffServiceServer;
 use gitaly_proto::gitaly::hook_service_server::HookServiceServer;
+use gitaly_proto::gitaly::operation_service_server::OperationServiceServer;
 use gitaly_proto::gitaly::ref_service_server::RefServiceServer;
 use gitaly_proto::gitaly::repository_service_server::RepositoryServiceServer;
 use gitaly_proto::gitaly::server_service_server::ServerServiceServer;
@@ -24,6 +25,7 @@ use crate::service::blob::BlobServiceImpl;
 use crate::service::commit::CommitServiceImpl;
 use crate::service::diff::DiffServiceImpl;
 use crate::service::hook::HookServiceImpl;
+use crate::service::operations::OperationServiceImpl;
 use crate::service::ref_::RefServiceImpl;
 use crate::service::repository::RepositoryServiceImpl;
 use crate::service::server::ServerServiceImpl;
@@ -165,6 +167,10 @@ impl GitalyServer {
             ))
             .add_service(HookServiceServer::with_interceptor(
                 HookServiceImpl::new(Arc::clone(&dependencies)),
+                interceptor.clone(),
+            ))
+            .add_service(OperationServiceServer::with_interceptor(
+                OperationServiceImpl::new(Arc::clone(&dependencies)),
                 interceptor.clone(),
             ))
             .add_service(SmartHttpServiceServer::with_interceptor(

@@ -1,7 +1,9 @@
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
+use std::process::Stdio;
 use std::sync::Arc;
 
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
@@ -122,6 +124,43 @@ where
         .map_err(|err| Status::internal(format!("failed to execute git command: {err}")))
 }
 
+async fn git_output_with_input<I, S>(
+    repo_path: &Path,
+    args: I,
+    stdin_payload: &[u8],
+) -> Result<std::process::Output, Status>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut command = Command::new("git");
+    command.arg("-C").arg(repo_path);
+    for arg in args {
+        command.arg(arg.as_ref());
+    }
+
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|err| Status::internal(format!("failed to spawn git command: {err}")))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(stdin_payload)
+            .await
+            .map_err(|err| Status::internal(format!("failed to write git stdin: {err}")))?;
+    }
+
+    child
+        .wait_with_output()
+        .await
+        .map_err(|err| Status::internal(format!("failed to await git command: {err}")))
+}
+
 fn status_for_git_failure(args: &str, output: &std::process::Output) -> Status {
     Status::internal(format!(
         "git command failed: git {args}; stderr: {}",
@@ -200,9 +239,44 @@ impl SmartHttpService for SmartHttpServiceImpl {
 
     async fn post_receive_pack(
         &self,
-        _request: Request<tonic::Streaming<PostReceivePackRequest>>,
+        request: Request<tonic::Streaming<PostReceivePackRequest>>,
     ) -> Result<Response<Self::PostReceivePackStream>, Status> {
-        Err(unimplemented_smart_http_rpc("post_receive_pack"))
+        let mut stream = request.into_inner();
+        let mut repository = None;
+        let mut payload = Vec::new();
+
+        while let Some(message) = stream
+            .message()
+            .await
+            .map_err(|err| Status::invalid_argument(format!("invalid request stream: {err}")))?
+        {
+            if repository.is_none() {
+                repository = message.repository;
+            }
+
+            if !message.data.is_empty() {
+                payload.extend_from_slice(&message.data);
+            }
+        }
+
+        let repo_path = self.resolve_repo_path(repository)?;
+        let output = git_output_with_input(
+            &repo_path,
+            ["receive-pack", "--stateless-rpc", "."],
+            &payload,
+        )
+        .await?;
+
+        if !output.status.success() {
+            return Err(status_for_git_failure(
+                "-C <repo> receive-pack --stateless-rpc .",
+                &output,
+            ));
+        }
+
+        Ok(stream_bytes(output.stdout, |data| {
+            PostReceivePackResponse { data }
+        }))
     }
 }
 
@@ -212,9 +286,18 @@ mod tests {
 
     use std::collections::HashMap;
     use std::process::Command;
+    use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use tokio::sync::oneshot;
+    use tokio::task::JoinHandle;
+    use tokio::time::sleep;
     use tokio_stream::StreamExt;
+    use tonic::Code;
+    use tonic::transport::Channel;
+
+    use gitaly_proto::gitaly::smart_http_service_client::SmartHttpServiceClient;
+    use gitaly_proto::gitaly::smart_http_service_server::SmartHttpServiceServer;
 
     fn unique_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -239,6 +322,49 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    async fn start_server(
+        service: SmartHttpServiceImpl,
+    ) -> (String, oneshot::Sender<()>, JoinHandle<()>) {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral listener should bind");
+        let server_addr = listener
+            .local_addr()
+            .expect("ephemeral listener should provide local address");
+        drop(listener);
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server_task = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(SmartHttpServiceServer::new(service))
+                .serve_with_shutdown(server_addr, async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("server should run");
+        });
+
+        (format!("http://{server_addr}"), shutdown_tx, server_task)
+    }
+
+    async fn connect_client(endpoint: String) -> SmartHttpServiceClient<Channel> {
+        for _ in 0..50 {
+            match SmartHttpServiceClient::connect(endpoint.clone()).await {
+                Ok(client) => return client,
+                Err(_) => sleep(Duration::from_millis(10)).await,
+            }
+        }
+
+        panic!("server did not become reachable at {endpoint}");
+    }
+
+    async fn shutdown_server(shutdown_tx: oneshot::Sender<()>, server_task: JoinHandle<()>) {
+        let _ = shutdown_tx.send(());
+        let join_result = tokio::time::timeout(Duration::from_secs(2), server_task)
+            .await
+            .expect("server should stop within timeout");
+        join_result.expect("server task should not panic");
     }
 
     #[tokio::test]
@@ -299,6 +425,79 @@ mod tests {
             "advertised refs should include a heads reference"
         );
 
+        if storage_root.exists() {
+            std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
+        }
+    }
+
+    #[tokio::test]
+    async fn post_receive_pack_requires_repository_in_stream() {
+        let storage_root = unique_dir("smarthttp-post-receive-repo-required");
+        let mut storage_paths = HashMap::new();
+        storage_paths.insert("default".to_string(), storage_root.clone());
+        let dependencies = Arc::new(Dependencies::default().with_storage_paths(storage_paths));
+        let (endpoint, shutdown_tx, server_task) =
+            start_server(SmartHttpServiceImpl::new(dependencies)).await;
+        let mut client = connect_client(endpoint).await;
+
+        let request_stream = tokio_stream::iter(vec![PostReceivePackRequest {
+            repository: None,
+            data: b"0000".to_vec(),
+            ..PostReceivePackRequest::default()
+        }]);
+
+        let status = client
+            .post_receive_pack(request_stream)
+            .await
+            .err()
+            .expect("missing repository should fail");
+        assert_eq!(status.code(), Code::InvalidArgument);
+
+        shutdown_server(shutdown_tx, server_task).await;
+        if storage_root.exists() {
+            std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
+        }
+    }
+
+    #[tokio::test]
+    async fn post_receive_pack_executes_receive_pack_instead_of_unimplemented() {
+        let storage_root = unique_dir("smarthttp-post-receive-exec");
+        let repo_path = storage_root.join("project.git");
+        std::fs::create_dir_all(&storage_root).expect("storage root should be creatable");
+        std::fs::create_dir_all(&repo_path).expect("repo path should be creatable");
+        run_git(&repo_path, &["init", "--bare", "--quiet"]);
+
+        let mut storage_paths = HashMap::new();
+        storage_paths.insert("default".to_string(), storage_root.clone());
+        let dependencies = Arc::new(Dependencies::default().with_storage_paths(storage_paths));
+        let (endpoint, shutdown_tx, server_task) =
+            start_server(SmartHttpServiceImpl::new(dependencies)).await;
+        let mut client = connect_client(endpoint).await;
+
+        let request_stream = tokio_stream::iter(vec![PostReceivePackRequest {
+            repository: Some(Repository {
+                storage_name: "default".to_string(),
+                relative_path: "project.git".to_string(),
+                ..Repository::default()
+            }),
+            data: b"0000".to_vec(),
+            ..PostReceivePackRequest::default()
+        }]);
+
+        match client.post_receive_pack(request_stream).await {
+            Ok(response) => {
+                let mut stream = response.into_inner();
+                let _ = stream
+                    .message()
+                    .await
+                    .expect("stream read should succeed");
+            }
+            Err(status) => {
+                assert_ne!(status.code(), Code::Unimplemented);
+            }
+        }
+
+        shutdown_server(shutdown_tx, server_task).await;
         if storage_root.exists() {
             std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
         }

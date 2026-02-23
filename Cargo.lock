@@ -386,10 +386,13 @@ version = "0.1.0"
 dependencies = [
  "gitaly-cgroups",
  "gitaly-config",
+ "gitaly-git",
  "gitaly-limiter",
  "gitaly-proto",
+ "sha2",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "tonic",
 ]
 

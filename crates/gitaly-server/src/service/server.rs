@@ -115,6 +115,7 @@ impl ServerService for ServerServiceImpl {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use tonic::Request;
@@ -143,6 +144,7 @@ mod tests {
                 available: 7,
                 used: 11,
             }],
+            storage_paths: HashMap::new(),
             server_signature_public_key: b"ssh-ed25519 AAAA-test-key".to_vec(),
             ready,
         })

@@ -5,6 +5,8 @@ use tonic::transport::server::Router;
 use gitaly_cgroups::{CgroupConfig, CgroupManagerError};
 use gitaly_config::RuntimeConfig;
 use gitaly_limiter::concurrency::ConcurrencyLimiter;
+use gitaly_proto::gitaly::ref_service_server::RefServiceServer;
+use gitaly_proto::gitaly::repository_service_server::RepositoryServiceServer;
 use gitaly_proto::gitaly::server_service_server::ServerServiceServer;
 use thiserror::Error;
 
@@ -12,6 +14,8 @@ use crate::dependencies::Dependencies;
 use crate::middleware;
 use crate::middleware::MiddlewareContext;
 use crate::runtime::RuntimePaths;
+use crate::service::ref_::RefServiceImpl;
+use crate::service::repository::RepositoryServiceImpl;
 use crate::service::server::ServerServiceImpl;
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -124,10 +128,21 @@ impl GitalyServer {
         dependencies: Arc<Dependencies>,
         middleware_context: Arc<MiddlewareContext>,
     ) -> Router {
-        tonic::transport::Server::builder().add_service(ServerServiceServer::with_interceptor(
-            ServerServiceImpl::new(dependencies),
-            middleware::ordered_interceptor_with_context(middleware_context),
-        ))
+        let interceptor = middleware::ordered_interceptor_with_context(middleware_context);
+
+        tonic::transport::Server::builder()
+            .add_service(ServerServiceServer::with_interceptor(
+                ServerServiceImpl::new(Arc::clone(&dependencies)),
+                interceptor.clone(),
+            ))
+            .add_service(RepositoryServiceServer::with_interceptor(
+                RepositoryServiceImpl::new(Arc::clone(&dependencies)),
+                interceptor.clone(),
+            ))
+            .add_service(RefServiceServer::with_interceptor(
+                RefServiceImpl::new(dependencies),
+                interceptor,
+            ))
     }
 }
 

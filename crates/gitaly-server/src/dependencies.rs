@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageStatus {
     pub storage_name: String,
@@ -30,6 +33,7 @@ pub struct Dependencies {
     pub server_version: String,
     pub git_version: String,
     pub storage_statuses: Vec<StorageStatus>,
+    pub storage_paths: HashMap<String, PathBuf>,
     pub server_signature_public_key: Vec<u8>,
     pub ready: bool,
 }
@@ -61,6 +65,12 @@ impl Dependencies {
     }
 
     #[must_use]
+    pub fn with_storage_paths(mut self, storage_paths: HashMap<String, PathBuf>) -> Self {
+        self.storage_paths = storage_paths;
+        self
+    }
+
+    #[must_use]
     pub fn with_server_signature_public_key(
         mut self,
         server_signature_public_key: Vec<u8>,
@@ -82,6 +92,7 @@ impl Default for Dependencies {
             server_version: env!("CARGO_PKG_VERSION").to_string(),
             git_version: "unknown".to_string(),
             storage_statuses: vec![StorageStatus::default()],
+            storage_paths: HashMap::new(),
             server_signature_public_key: Vec::new(),
             ready: true,
         }

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::net::SocketAddr;
@@ -72,10 +73,16 @@ fn build_dependencies(config: &Config) -> Dependencies {
             ..StorageStatus::default()
         })
         .collect();
+    let storage_paths = config
+        .storages
+        .iter()
+        .map(|storage| (storage.name.clone(), PathBuf::from(storage.path.clone())))
+        .collect::<HashMap<_, _>>();
 
     Dependencies::default()
         .with_git_version(detect_git_version())
         .with_storage_statuses(storage_statuses)
+        .with_storage_paths(storage_paths)
 }
 
 fn detect_git_version() -> String {

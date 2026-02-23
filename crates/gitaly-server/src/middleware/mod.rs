@@ -16,6 +16,7 @@ pub mod metrics;
 pub mod panic;
 pub mod request_info;
 pub mod sentry;
+pub mod sidechannel;
 pub mod status;
 
 const DEFAULT_LIMITER_CONCURRENCY_LIMIT: usize = 1024;
@@ -105,6 +106,7 @@ fn run_chain(request: Request<()>, context: &MiddlewareContext) -> Result<Reques
     let request = auth::apply(request)?;
     let request = limiting::apply(request, context)?;
     let request = cache_invalidation::apply(request)?;
+    let request = sidechannel::apply(request)?;
     panic::apply(request)
 }
 
@@ -132,7 +134,7 @@ mod tests {
 
     use super::{limiting, ordered_interceptor, run_chain, MiddlewareContext, MiddlewareTrace};
 
-    const ORDERED_STEPS: [&str; 11] = [
+    const ORDERED_STEPS: [&str; 12] = [
         "correlation_id",
         "request_info",
         "metrics",
@@ -143,6 +145,7 @@ mod tests {
         "auth",
         "limiting",
         "cache_invalidation",
+        "sidechannel",
         "panic",
     ];
 

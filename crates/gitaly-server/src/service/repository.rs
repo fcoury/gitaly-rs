@@ -465,7 +465,9 @@ impl RepositoryService for RepositoryServiceImpl {
         &self,
         _request: Request<tonic::Streaming<CreateRepositoryFromBundleRequest>>,
     ) -> Result<Response<CreateRepositoryFromBundleResponse>, Status> {
-        Err(unimplemented_repository_rpc("create_repository_from_bundle"))
+        Err(unimplemented_repository_rpc(
+            "create_repository_from_bundle",
+        ))
     }
 
     async fn get_config(
@@ -541,7 +543,9 @@ impl RepositoryService for RepositoryServiceImpl {
         &self,
         _request: Request<CreateRepositoryFromSnapshotRequest>,
     ) -> Result<Response<CreateRepositoryFromSnapshotResponse>, Status> {
-        Err(unimplemented_repository_rpc("create_repository_from_snapshot"))
+        Err(unimplemented_repository_rpc(
+            "create_repository_from_snapshot",
+        ))
     }
 
     async fn get_raw_changes(

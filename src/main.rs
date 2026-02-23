@@ -10,6 +10,7 @@ use gitaly_config::Config;
 use gitaly_server::{
     Dependencies, GitalyServer, RuntimePaths, ServerBootstrapError, StorageStatus,
 };
+use tokio::sync::watch;
 
 const ENV_CONFIG_PATH: &str = "GITALY_CONFIG";
 const ENV_RUNTIME_DIR: &str = "GITALY_RUNTIME_DIR";
@@ -22,26 +23,70 @@ async fn main() -> Result<()> {
     let runtime_paths =
         RuntimePaths::bootstrap(runtime_dir).context("failed to bootstrap runtime paths")?;
 
-    let listen_addr = parse_listen_addr(&config.listen_addr)?;
+    let listen_addr = parse_socket_addr("listen_addr", &config.listen_addr)?;
+    let internal_addr = parse_socket_addr("internal_addr", &config.internal_addr)?;
     let dependencies = Arc::new(build_dependencies(&config));
-    let router = GitalyServer::build_router_with_dependencies_runtime_config(
-        dependencies,
+
+    eprintln!("gitaly-rs external listener: {listen_addr}");
+    if internal_addr != listen_addr {
+        eprintln!("gitaly-rs internal listener: {internal_addr}");
+    } else {
+        eprintln!("gitaly-rs internal listener shares external address: {internal_addr}");
+    }
+    eprintln!(
+        "gitaly-rs runtime dir: {}",
+        runtime_paths.pid_dir().display()
+    );
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    let external_router = GitalyServer::build_router_with_dependencies_runtime_config(
+        Arc::clone(&dependencies),
         &runtime_paths,
         &config.runtime,
     )
     .map_err(map_bootstrap_error)?;
+    let external_shutdown_rx = shutdown_rx.clone();
+    let external_task = tokio::spawn(async move {
+        external_router
+            .serve_with_shutdown(listen_addr, shutdown_future(external_shutdown_rx))
+            .await
+            .context("external gRPC server exited with error")
+    });
 
-    eprintln!(
-        "gitaly-rs listening on {listen_addr} (runtime: {})",
-        runtime_paths.pid_dir().display()
-    );
+    let internal_task = if internal_addr != listen_addr {
+        let internal_router = GitalyServer::build_router_with_dependencies_runtime_config(
+            Arc::clone(&dependencies),
+            &runtime_paths,
+            &config.runtime,
+        )
+        .map_err(map_bootstrap_error)?;
+        let internal_shutdown_rx = shutdown_rx.clone();
+        Some(tokio::spawn(async move {
+            internal_router
+                .serve_with_shutdown(internal_addr, shutdown_future(internal_shutdown_rx))
+                .await
+                .context("internal gRPC server exited with error")
+        }))
+    } else {
+        None
+    };
 
-    router
-        .serve_with_shutdown(listen_addr, async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+    tokio::signal::ctrl_c()
         .await
-        .context("gRPC server exited with error")
+        .context("failed to wait for Ctrl-C")?;
+    let _ = shutdown_tx.send(true);
+
+    external_task
+        .await
+        .context("external listener task panicked")??;
+    if let Some(internal_task) = internal_task {
+        internal_task
+            .await
+            .context("internal listener task panicked")??;
+    }
+
+    Ok(())
 }
 
 fn load_config(path: &PathBuf) -> Result<Config> {
@@ -50,10 +95,22 @@ fn load_config(path: &PathBuf) -> Result<Config> {
     Config::from_toml(&raw).with_context(|| format!("failed to parse config `{}`", path.display()))
 }
 
-fn parse_listen_addr(listen_addr: &str) -> Result<SocketAddr> {
+fn parse_socket_addr(field_name: &str, listen_addr: &str) -> Result<SocketAddr> {
     listen_addr
         .parse::<SocketAddr>()
-        .with_context(|| format!("invalid `listen_addr`: `{listen_addr}`"))
+        .with_context(|| format!("invalid `{field_name}`: `{listen_addr}`"))
+}
+
+async fn shutdown_future(mut shutdown_rx: watch::Receiver<bool>) {
+    loop {
+        if *shutdown_rx.borrow() {
+            break;
+        }
+
+        if shutdown_rx.changed().await.is_err() {
+            break;
+        }
+    }
 }
 
 fn default_runtime_dir() -> PathBuf {

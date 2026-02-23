@@ -487,14 +487,18 @@ impl RefService for RefServiceImpl {
         &self,
         _request: Request<ListBranchNamesContainingCommitRequest>,
     ) -> Result<Response<Self::ListBranchNamesContainingCommitStream>, Status> {
-        Err(unimplemented_ref_service("list_branch_names_containing_commit"))
+        Err(unimplemented_ref_service(
+            "list_branch_names_containing_commit",
+        ))
     }
 
     async fn list_tag_names_containing_commit(
         &self,
         _request: Request<ListTagNamesContainingCommitRequest>,
     ) -> Result<Response<Self::ListTagNamesContainingCommitStream>, Status> {
-        Err(unimplemented_ref_service("list_tag_names_containing_commit"))
+        Err(unimplemented_ref_service(
+            "list_tag_names_containing_commit",
+        ))
     }
 
     async fn get_tag_signatures(

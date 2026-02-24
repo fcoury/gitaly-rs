@@ -130,10 +130,6 @@ where
     Response::new(Box::pin(tokio_stream::iter(vec![Ok(response)])))
 }
 
-fn unimplemented_ref_service(method: &'static str) -> Status {
-    Status::unimplemented(format!("RefService::{method} is not implemented"))
-}
-
 #[tonic::async_trait]
 impl RefService for RefServiceImpl {
     type FindLocalBranchesStream = ServiceStream<FindLocalBranchesResponse>;
@@ -265,9 +261,58 @@ impl RefService for RefServiceImpl {
 
     async fn find_all_branches(
         &self,
-        _request: Request<FindAllBranchesRequest>,
+        request: Request<FindAllBranchesRequest>,
     ) -> Result<Response<Self::FindAllBranchesStream>, Status> {
-        Err(unimplemented_ref_service("find_all_branches"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        let mut args = vec![
+            "for-each-ref".to_string(),
+            "--format=%(refname)\t%(objectname)".to_string(),
+        ];
+
+        if request.merged_only {
+            if request.merged_branches.is_empty() {
+                args.push("--merged=HEAD".to_string());
+            } else {
+                let merged_refs = request
+                    .merged_branches
+                    .into_iter()
+                    .map(|value| decode_utf8("merged_branches", value))
+                    .collect::<Result<Vec<_>, _>>()?;
+                for merged_ref in merged_refs {
+                    args.push(format!("--merged={merged_ref}"));
+                }
+            }
+        }
+
+        args.push("refs/heads".to_string());
+        args.push("refs/remotes".to_string());
+
+        let output = git_output(&repo_path, args.iter().map(String::as_str)).await?;
+        if !output.status.success() {
+            return Err(status_for_git_failure(
+                "-C <repo> for-each-ref --format=%(refname)\\t%(objectname) refs/heads refs/remotes",
+                &output,
+            ));
+        }
+
+        let branches = parse_output_lines(&output.stdout)
+            .into_iter()
+            .filter_map(|line| {
+                let mut parts = line.splitn(2, '\t');
+                let name = parts.next()?.as_bytes().to_vec();
+                let target = parts.next()?.to_string();
+                Some(find_all_branches_response::Branch {
+                    name,
+                    target: Some(GitCommit {
+                        id: target,
+                        ..GitCommit::default()
+                    }),
+                })
+            })
+            .collect();
+
+        Ok(build_stream_response(FindAllBranchesResponse { branches }))
     }
 
     async fn find_all_tags(
@@ -311,16 +356,106 @@ impl RefService for RefServiceImpl {
 
     async fn find_tag(
         &self,
-        _request: Request<FindTagRequest>,
+        request: Request<FindTagRequest>,
     ) -> Result<Response<FindTagResponse>, Status> {
-        Err(unimplemented_ref_service("find_tag"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        let tag_name = decode_utf8("tag_name", request.tag_name)?;
+        if tag_name.trim().is_empty() {
+            return Err(Status::invalid_argument("tag_name is required"));
+        }
+
+        let full_ref = if tag_name.starts_with("refs/tags/") {
+            tag_name
+        } else {
+            format!("refs/tags/{tag_name}")
+        };
+        let output = git_output(
+            &repo_path,
+            [
+                "for-each-ref",
+                "--format=%(refname)\t%(objectname)",
+                full_ref.as_str(),
+            ],
+        )
+        .await?;
+        if !output.status.success() {
+            return Err(status_for_git_failure(
+                "-C <repo> for-each-ref --format=%(refname)\\t%(objectname) <tag-ref>",
+                &output,
+            ));
+        }
+
+        let Some(line) = parse_output_lines(&output.stdout).into_iter().next() else {
+            return Err(Status::not_found("tag not found"));
+        };
+        let mut parts = line.splitn(2, '\t');
+        let name = parts
+            .next()
+            .map(str::as_bytes)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| Status::internal("failed to parse tag name"))?;
+        let id = parts
+            .next()
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| Status::internal("failed to parse tag target"))?;
+
+        Ok(Response::new(FindTagResponse {
+            tag: Some(Tag {
+                name,
+                id,
+                ..Tag::default()
+            }),
+        }))
     }
 
     async fn find_all_remote_branches(
         &self,
-        _request: Request<FindAllRemoteBranchesRequest>,
+        request: Request<FindAllRemoteBranchesRequest>,
     ) -> Result<Response<Self::FindAllRemoteBranchesStream>, Status> {
-        Err(unimplemented_ref_service("find_all_remote_branches"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        let remote_pattern = if request.remote_name.trim().is_empty() {
+            "refs/remotes".to_string()
+        } else {
+            format!("refs/remotes/{}", request.remote_name.trim())
+        };
+
+        let output = git_output(
+            &repo_path,
+            [
+                "for-each-ref",
+                "--format=%(refname)\t%(objectname)",
+                remote_pattern.as_str(),
+            ],
+        )
+        .await?;
+        if !output.status.success() {
+            return Err(status_for_git_failure(
+                "-C <repo> for-each-ref --format=%(refname)\\t%(objectname) refs/remotes/<remote>",
+                &output,
+            ));
+        }
+
+        let branches = parse_output_lines(&output.stdout)
+            .into_iter()
+            .filter_map(|line| {
+                let mut parts = line.splitn(2, '\t');
+                let name = parts.next()?.as_bytes().to_vec();
+                let target_id = parts.next()?.to_string();
+                Some(Branch {
+                    name,
+                    target_commit: Some(GitCommit {
+                        id: target_id,
+                        ..GitCommit::default()
+                    }),
+                })
+            })
+            .collect();
+
+        Ok(build_stream_response(FindAllRemoteBranchesResponse {
+            branches,
+        }))
     }
 
     async fn ref_exists(
@@ -344,9 +479,59 @@ impl RefService for RefServiceImpl {
 
     async fn find_branch(
         &self,
-        _request: Request<FindBranchRequest>,
+        request: Request<FindBranchRequest>,
     ) -> Result<Response<FindBranchResponse>, Status> {
-        Err(unimplemented_ref_service("find_branch"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        let branch_name = decode_utf8("name", request.name)?;
+        if branch_name.trim().is_empty() {
+            return Err(Status::invalid_argument("name is required"));
+        }
+
+        let full_ref = if branch_name.starts_with("refs/heads/") {
+            branch_name
+        } else {
+            format!("refs/heads/{branch_name}")
+        };
+        let output = git_output(
+            &repo_path,
+            [
+                "for-each-ref",
+                "--format=%(refname)\t%(objectname)",
+                full_ref.as_str(),
+            ],
+        )
+        .await?;
+        if !output.status.success() {
+            return Err(status_for_git_failure(
+                "-C <repo> for-each-ref --format=%(refname)\\t%(objectname) refs/heads/<name>",
+                &output,
+            ));
+        }
+
+        let Some(line) = parse_output_lines(&output.stdout).into_iter().next() else {
+            return Err(Status::not_found("branch not found"));
+        };
+        let mut parts = line.splitn(2, '\t');
+        let name = parts
+            .next()
+            .map(str::as_bytes)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| Status::internal("failed to parse branch name"))?;
+        let target_id = parts
+            .next()
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| Status::internal("failed to parse branch target"))?;
+
+        Ok(Response::new(FindBranchResponse {
+            branch: Some(Branch {
+                name,
+                target_commit: Some(GitCommit {
+                    id: target_id,
+                    ..GitCommit::default()
+                }),
+            }),
+        }))
     }
 
     async fn update_references(
@@ -485,34 +670,187 @@ impl RefService for RefServiceImpl {
 
     async fn list_branch_names_containing_commit(
         &self,
-        _request: Request<ListBranchNamesContainingCommitRequest>,
+        request: Request<ListBranchNamesContainingCommitRequest>,
     ) -> Result<Response<Self::ListBranchNamesContainingCommitStream>, Status> {
-        Err(unimplemented_ref_service(
-            "list_branch_names_containing_commit",
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        if request.commit_id.trim().is_empty() {
+            return Err(Status::invalid_argument("commit_id is required"));
+        }
+
+        let output = git_output(
+            &repo_path,
+            [
+                "for-each-ref",
+                "--contains",
+                request.commit_id.as_str(),
+                "--format=%(refname:short)",
+                "refs/heads",
+            ],
+        )
+        .await?;
+        if !output.status.success() {
+            return Err(status_for_git_failure(
+                "-C <repo> for-each-ref --contains <commit_id> --format=%(refname:short) refs/heads",
+                &output,
+            ));
+        }
+
+        let mut branch_names = parse_output_lines(&output.stdout)
+            .into_iter()
+            .map(String::into_bytes)
+            .collect::<Vec<_>>();
+        if request.limit > 0 {
+            branch_names.truncate(usize::try_from(request.limit).unwrap_or(usize::MAX));
+        }
+
+        Ok(build_stream_response(
+            ListBranchNamesContainingCommitResponse { branch_names },
         ))
     }
 
     async fn list_tag_names_containing_commit(
         &self,
-        _request: Request<ListTagNamesContainingCommitRequest>,
+        request: Request<ListTagNamesContainingCommitRequest>,
     ) -> Result<Response<Self::ListTagNamesContainingCommitStream>, Status> {
-        Err(unimplemented_ref_service(
-            "list_tag_names_containing_commit",
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        if request.commit_id.trim().is_empty() {
+            return Err(Status::invalid_argument("commit_id is required"));
+        }
+
+        let output = git_output(
+            &repo_path,
+            [
+                "for-each-ref",
+                "--contains",
+                request.commit_id.as_str(),
+                "--format=%(refname:short)",
+                "refs/tags",
+            ],
+        )
+        .await?;
+        if !output.status.success() {
+            return Err(status_for_git_failure(
+                "-C <repo> for-each-ref --contains <commit_id> --format=%(refname:short) refs/tags",
+                &output,
+            ));
+        }
+
+        let mut tag_names = parse_output_lines(&output.stdout)
+            .into_iter()
+            .map(String::into_bytes)
+            .collect::<Vec<_>>();
+        if request.limit > 0 {
+            tag_names.truncate(usize::try_from(request.limit).unwrap_or(usize::MAX));
+        }
+
+        Ok(build_stream_response(
+            ListTagNamesContainingCommitResponse { tag_names },
         ))
     }
 
     async fn get_tag_signatures(
         &self,
-        _request: Request<GetTagSignaturesRequest>,
+        request: Request<GetTagSignaturesRequest>,
     ) -> Result<Response<Self::GetTagSignaturesStream>, Status> {
-        Err(unimplemented_ref_service("get_tag_signatures"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        if request.tag_revisions.is_empty() {
+            return Err(Status::invalid_argument(
+                "tag_revisions must contain at least one revision",
+            ));
+        }
+
+        let mut signatures = Vec::new();
+        for revision in request.tag_revisions {
+            if revision.trim().is_empty() {
+                return Err(Status::invalid_argument(
+                    "tag_revisions entries must not be empty",
+                ));
+            }
+
+            let type_output = git_output(&repo_path, ["cat-file", "-t", revision.as_str()]).await?;
+            if !type_output.status.success() {
+                return Err(status_for_git_failure(
+                    "-C <repo> cat-file -t <revision>",
+                    &type_output,
+                ));
+            }
+            if String::from_utf8_lossy(&type_output.stdout).trim() != "tag" {
+                continue;
+            }
+
+            let tag_id_output = git_output(&repo_path, ["rev-parse", revision.as_str()]).await?;
+            if !tag_id_output.status.success() {
+                return Err(status_for_git_failure(
+                    "-C <repo> rev-parse <revision>",
+                    &tag_id_output,
+                ));
+            }
+            let tag_id = String::from_utf8_lossy(&tag_id_output.stdout)
+                .trim()
+                .to_string();
+
+            let content_output =
+                git_output(&repo_path, ["cat-file", "-p", tag_id.as_str()]).await?;
+            if !content_output.status.success() {
+                return Err(status_for_git_failure(
+                    "-C <repo> cat-file -p <tag-id>",
+                    &content_output,
+                ));
+            }
+
+            signatures.push(get_tag_signatures_response::TagSignature {
+                tag_id,
+                signature: Vec::new(),
+                content: content_output.stdout,
+            });
+        }
+
+        Ok(build_stream_response(GetTagSignaturesResponse {
+            signatures,
+        }))
     }
 
     async fn get_tag_messages(
         &self,
-        _request: Request<GetTagMessagesRequest>,
+        request: Request<GetTagMessagesRequest>,
     ) -> Result<Response<Self::GetTagMessagesStream>, Status> {
-        Err(unimplemented_ref_service("get_tag_messages"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        if request.tag_ids.is_empty() {
+            return Err(Status::invalid_argument(
+                "tag_ids must contain at least one entry",
+            ));
+        }
+
+        let mut responses = Vec::new();
+        for tag_id in request.tag_ids {
+            if tag_id.trim().is_empty() {
+                return Err(Status::invalid_argument(
+                    "tag_ids entries must not be empty",
+                ));
+            }
+
+            let output = git_output(&repo_path, ["cat-file", "-p", tag_id.as_str()]).await?;
+            if !output.status.success() {
+                return Err(status_for_git_failure(
+                    "-C <repo> cat-file -p <tag-id>",
+                    &output,
+                ));
+            }
+            let payload = String::from_utf8_lossy(&output.stdout);
+            let message = payload
+                .split_once("\n\n")
+                .map_or_else(Vec::new, |(_, message)| message.as_bytes().to_vec());
+
+            responses.push(GetTagMessagesResponse { message, tag_id });
+        }
+
+        Ok(Response::new(Box::pin(tokio_stream::iter(
+            responses.into_iter().map(Ok),
+        ))))
     }
 
     async fn list_refs(
@@ -622,9 +960,49 @@ impl RefService for RefServiceImpl {
 
     async fn find_refs_by_oid(
         &self,
-        _request: Request<FindRefsByOidRequest>,
+        request: Request<FindRefsByOidRequest>,
     ) -> Result<Response<FindRefsByOidResponse>, Status> {
-        Err(unimplemented_ref_service("find_refs_by_oid"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        if request.oid.trim().is_empty() {
+            return Err(Status::invalid_argument("oid is required"));
+        }
+
+        let mut args = vec![
+            "for-each-ref".to_string(),
+            "--format=%(refname)".to_string(),
+            format!("--points-at={}", request.oid),
+            format!(
+                "--sort={}",
+                if request.sort_field.trim().is_empty() {
+                    "refname"
+                } else {
+                    request.sort_field.trim()
+                }
+            ),
+        ];
+
+        if request.ref_patterns.is_empty() {
+            args.push("refs/heads".to_string());
+            args.push("refs/tags".to_string());
+        } else {
+            args.extend(request.ref_patterns);
+        }
+
+        let output = git_output(&repo_path, args.iter().map(String::as_str)).await?;
+        if !output.status.success() {
+            return Err(status_for_git_failure(
+                "-C <repo> for-each-ref --points-at=<oid> <patterns>",
+                &output,
+            ));
+        }
+
+        let mut refs = parse_output_lines(&output.stdout);
+        if request.limit > 0 {
+            refs.truncate(usize::try_from(request.limit).unwrap_or(usize::MAX));
+        }
+
+        Ok(Response::new(FindRefsByOidResponse { refs }))
     }
 }
 
@@ -639,7 +1017,12 @@ mod tests {
     use tonic::Request;
 
     use gitaly_proto::gitaly::ref_service_server::RefService;
-    use gitaly_proto::gitaly::{ListRefsRequest, RefExistsRequest, Repository};
+    use gitaly_proto::gitaly::{
+        FindAllBranchesRequest, FindAllRemoteBranchesRequest, FindBranchRequest,
+        FindRefsByOidRequest, FindTagRequest, GetTagMessagesRequest, GetTagSignaturesRequest,
+        ListBranchNamesContainingCommitRequest, ListRefsRequest,
+        ListTagNamesContainingCommitRequest, RefExistsRequest, Repository,
+    };
 
     use crate::dependencies::Dependencies;
 
@@ -668,6 +1051,27 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn git_stdout(repo_path: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(args)
+            .output()
+            .expect("git should execute");
+        assert!(
+            output.status.success(),
+            "git -C {} {} failed\nstdout: {}\nstderr: {}",
+            repo_path.display(),
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git output should be UTF-8")
+            .trim()
+            .to_string()
     }
 
     #[tokio::test]
@@ -735,6 +1139,207 @@ mod tests {
         assert!(entries
             .iter()
             .any(|entry| entry == "refs/heads/feature/ref-service"));
+
+        if storage_root.exists() {
+            std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
+        }
+    }
+
+    #[tokio::test]
+    async fn remaining_read_methods_return_ref_and_tag_data() {
+        let storage_root = unique_dir("ref-service-remaining");
+        let repo_path = storage_root.join("project.git");
+
+        std::fs::create_dir_all(&storage_root).expect("storage root should be creatable");
+        std::fs::create_dir_all(&repo_path).expect("repo path should be creatable");
+
+        run_git(&repo_path, &["init", "--quiet"]);
+        run_git(&repo_path, &["config", "user.name", "Ref Service Tests"]);
+        run_git(
+            &repo_path,
+            &["config", "user.email", "ref-service-tests@example.com"],
+        );
+
+        std::fs::write(repo_path.join("README.md"), b"hello\n").expect("README should write");
+        run_git(&repo_path, &["add", "README.md"]);
+        run_git(&repo_path, &["commit", "--quiet", "-m", "initial"]);
+        run_git(&repo_path, &["branch", "feature/ref-service"]);
+        run_git(&repo_path, &["tag", "-a", "v1.0.0", "-m", "annotated tag"]);
+
+        let head_oid = git_stdout(&repo_path, &["rev-parse", "HEAD"]);
+        let tag_oid = git_stdout(&repo_path, &["rev-parse", "v1.0.0"]);
+        run_git(
+            &repo_path,
+            &["update-ref", "refs/remotes/origin/main", head_oid.as_str()],
+        );
+
+        let mut storage_paths = HashMap::new();
+        storage_paths.insert("default".to_string(), storage_root.clone());
+
+        let dependencies = Arc::new(Dependencies::default().with_storage_paths(storage_paths));
+        let service = RefServiceImpl::new(dependencies);
+
+        let repository = Repository {
+            storage_name: "default".to_string(),
+            relative_path: "project.git".to_string(),
+            ..Repository::default()
+        };
+
+        let mut all_branches_stream = service
+            .find_all_branches(Request::new(FindAllBranchesRequest {
+                repository: Some(repository.clone()),
+                ..FindAllBranchesRequest::default()
+            }))
+            .await
+            .expect("find_all_branches should succeed")
+            .into_inner();
+        let all_branches = all_branches_stream
+            .next()
+            .await
+            .expect("find_all_branches should return one response")
+            .expect("find_all_branches response should not error");
+        let branch_names = all_branches
+            .branches
+            .into_iter()
+            .map(|branch| String::from_utf8_lossy(&branch.name).into_owned())
+            .collect::<Vec<_>>();
+        assert!(branch_names
+            .iter()
+            .any(|name| name == "refs/heads/feature/ref-service"));
+        assert!(branch_names
+            .iter()
+            .any(|name| name == "refs/remotes/origin/main"));
+
+        let found_tag = service
+            .find_tag(Request::new(FindTagRequest {
+                repository: Some(repository.clone()),
+                tag_name: b"v1.0.0".to_vec(),
+            }))
+            .await
+            .expect("find_tag should succeed")
+            .into_inner()
+            .tag
+            .expect("find_tag should return a tag");
+        assert_eq!(String::from_utf8_lossy(&found_tag.name), "refs/tags/v1.0.0");
+
+        let mut remote_branches_stream = service
+            .find_all_remote_branches(Request::new(FindAllRemoteBranchesRequest {
+                repository: Some(repository.clone()),
+                remote_name: "origin".to_string(),
+            }))
+            .await
+            .expect("find_all_remote_branches should succeed")
+            .into_inner();
+        let remote_branches = remote_branches_stream
+            .next()
+            .await
+            .expect("find_all_remote_branches should return one response")
+            .expect("find_all_remote_branches response should not error");
+        assert!(remote_branches
+            .branches
+            .iter()
+            .any(|branch| String::from_utf8_lossy(&branch.name) == "refs/remotes/origin/main"));
+
+        let found_branch = service
+            .find_branch(Request::new(FindBranchRequest {
+                repository: Some(repository.clone()),
+                name: b"feature/ref-service".to_vec(),
+            }))
+            .await
+            .expect("find_branch should succeed")
+            .into_inner()
+            .branch
+            .expect("find_branch should return branch");
+        assert_eq!(
+            String::from_utf8_lossy(&found_branch.name),
+            "refs/heads/feature/ref-service"
+        );
+
+        let mut branch_names_stream = service
+            .list_branch_names_containing_commit(Request::new(
+                ListBranchNamesContainingCommitRequest {
+                    repository: Some(repository.clone()),
+                    commit_id: head_oid.clone(),
+                    limit: 0,
+                },
+            ))
+            .await
+            .expect("list_branch_names_containing_commit should succeed")
+            .into_inner();
+        let branch_names_response = branch_names_stream
+            .next()
+            .await
+            .expect("list_branch_names_containing_commit should return one response")
+            .expect("branch names response should not error");
+        assert!(branch_names_response
+            .branch_names
+            .iter()
+            .any(|name| String::from_utf8_lossy(name) == "feature/ref-service"));
+
+        let mut tag_names_stream = service
+            .list_tag_names_containing_commit(Request::new(ListTagNamesContainingCommitRequest {
+                repository: Some(repository.clone()),
+                commit_id: head_oid.clone(),
+                limit: 0,
+            }))
+            .await
+            .expect("list_tag_names_containing_commit should succeed")
+            .into_inner();
+        let tag_names_response = tag_names_stream
+            .next()
+            .await
+            .expect("list_tag_names_containing_commit should return one response")
+            .expect("tag names response should not error");
+        assert!(tag_names_response
+            .tag_names
+            .iter()
+            .any(|name| String::from_utf8_lossy(name) == "v1.0.0"));
+
+        let mut signatures_stream = service
+            .get_tag_signatures(Request::new(GetTagSignaturesRequest {
+                repository: Some(repository.clone()),
+                tag_revisions: vec!["v1.0.0".to_string()],
+            }))
+            .await
+            .expect("get_tag_signatures should succeed")
+            .into_inner();
+        let signatures_response = signatures_stream
+            .next()
+            .await
+            .expect("get_tag_signatures should return one response")
+            .expect("tag signatures response should not error");
+        assert_eq!(signatures_response.signatures.len(), 1);
+        assert!(!signatures_response.signatures[0].content.is_empty());
+
+        let mut messages_stream = service
+            .get_tag_messages(Request::new(GetTagMessagesRequest {
+                repository: Some(repository.clone()),
+                tag_ids: vec![tag_oid.clone()],
+            }))
+            .await
+            .expect("get_tag_messages should succeed")
+            .into_inner();
+        let tag_message_response = messages_stream
+            .next()
+            .await
+            .expect("get_tag_messages should return one response")
+            .expect("tag messages response should not error");
+        assert_eq!(tag_message_response.tag_id, tag_oid);
+        assert!(String::from_utf8_lossy(&tag_message_response.message).contains("annotated tag"));
+
+        let refs_by_oid = service
+            .find_refs_by_oid(Request::new(FindRefsByOidRequest {
+                repository: Some(repository),
+                oid: head_oid,
+                ..FindRefsByOidRequest::default()
+            }))
+            .await
+            .expect("find_refs_by_oid should succeed")
+            .into_inner();
+        assert!(refs_by_oid
+            .refs
+            .iter()
+            .any(|reference| reference == "refs/tags/v1.0.0"));
 
         if storage_root.exists() {
             std::fs::remove_dir_all(storage_root).expect("storage root should be removable");

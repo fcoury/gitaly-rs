@@ -31,8 +31,8 @@ Last updated: 2026-02-24
 | T01 | Productionize middleware chain foundations | `crates/gitaly-server/src/middleware/*` | done | Correlation/request-info/log-fields/logging/metrics/status/sidechannel/auth baselines implemented and wired |
 | T02 | Close remaining Phase 6 read RPC gaps | `service/{commit,diff,ref_,blob,ssh}.rs` | in_progress | Split into focused slices for deterministic commits |
 | T02a | Implement remaining DiffService read RPCs | `service/diff.rs` | done | Implemented `commit_diff`, `commit_delta`, and `diff_blobs` with focused tests |
-| T02b | Implement remaining RefService read RPCs | `service/ref_.rs` | in_progress | `find_all_branches`, `find_tag`, `find_all_remote_branches`, etc. |
-| T02c | Implement remaining BlobService read RPCs | `service/blob.rs` | pending | `list_all_blobs`, LFS pointer listing RPCs |
+| T02b | Implement remaining RefService read RPCs | `service/ref_.rs` | done | Implemented remaining read stubs with focused service tests |
+| T02c | Implement remaining BlobService read RPCs | `service/blob.rs` | in_progress | `list_all_blobs`, LFS pointer listing RPCs |
 | T02d | Implement remaining CommitService read RPCs | `service/commit.rs` | pending | remove `unimplemented` for remaining read methods |
 | T02e | Implement SSH sidechannel read RPC baseline | `service/ssh.rs` | pending | `ssh_upload_pack_with_sidechannel` |
 | T03 | Implement real write semantics in hook and operation flows | `service/{hook,operations,smarthttp,ssh}.rs` + `gitaly-git` | pending | Hook ordering, transactional behavior, meaningful responses |
@@ -43,17 +43,17 @@ Last updated: 2026-02-24
 
 ## Current Task Detail
 
-### T02b - Implement remaining RefService read RPCs
+### T02c - Implement remaining BlobService read RPCs
 
 Subtasks:
-- Implement `find_all_branches`.
-- Implement `find_tag`.
-- Implement `find_all_remote_branches`.
-- Implement remaining tag signature/message and `find_refs_by_oid`.
+- Implement `list_all_blobs`.
+- Implement `get_lfs_pointers`.
+- Implement `list_lfs_pointers`.
+- Implement `list_all_lfs_pointers`.
 - Add/update tests for newly implemented methods.
 
 Verification target:
-- `cargo test -p gitaly-server --lib service::ref_:: -- --test-threads=1`
+- `cargo test -p gitaly-server --lib service::blob:: -- --test-threads=1`
 
 ## Changelog
 
@@ -61,3 +61,4 @@ Verification target:
 - 2026-02-24: Completed T01 middleware baseline and auth wiring via config/dependencies.
 - 2026-02-24: Started T02 with T02a as current execution slice.
 - 2026-02-24: Completed T02a by implementing remaining DiffService read RPC stubs.
+- 2026-02-24: Completed T02b by implementing remaining RefService read RPC stubs.

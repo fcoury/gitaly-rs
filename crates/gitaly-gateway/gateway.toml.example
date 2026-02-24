@@ -1,0 +1,11 @@
+http_listen_addr = "127.0.0.1:8080"
+ssh_listen_addr = "127.0.0.1:2222"
+gitaly_addr = "http://127.0.0.1:2305"
+
+[auth]
+gitaly_token = "secret"
+client_tokens = ["user-token-1", "user-token-2"]
+ssh_public_keys = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... user@example"]
+
+[repositories]
+storage_name = "default"

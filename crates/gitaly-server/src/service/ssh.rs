@@ -130,6 +130,7 @@ fn unimplemented_ssh_rpc(method: &'static str) -> Status {
 
 #[tonic::async_trait]
 impl SshService for SshServiceImpl {
+    type SSHUploadPackStream = ServiceStream<SshUploadPackResponse>;
     type SSHReceivePackStream = ServiceStream<SshReceivePackResponse>;
     type SSHUploadArchiveStream = ServiceStream<SshUploadArchiveResponse>;
 
@@ -138,6 +139,39 @@ impl SshService for SshServiceImpl {
         _request: Request<SshUploadPackWithSidechannelRequest>,
     ) -> Result<Response<SshUploadPackWithSidechannelResponse>, Status> {
         Err(unimplemented_ssh_rpc("ssh_upload_pack_with_sidechannel"))
+    }
+
+    async fn ssh_upload_pack(
+        &self,
+        request: Request<tonic::Streaming<SshUploadPackRequest>>,
+    ) -> Result<Response<Self::SSHUploadPackStream>, Status> {
+        let mut stream = request.into_inner();
+        let mut repository_descriptor: Option<Repository> = None;
+        let mut stdin_payload = Vec::new();
+
+        while let Some(message) = stream
+            .message()
+            .await
+            .map_err(|err| Status::invalid_argument(format!("invalid upload-pack stream: {err}")))?
+        {
+            if repository_descriptor.is_none() {
+                repository_descriptor = message.repository;
+            }
+            if !message.stdin.is_empty() {
+                stdin_payload.extend_from_slice(&message.stdin);
+            }
+        }
+
+        let repo_path = self.resolve_repo_path(repository_descriptor)?;
+        let output = git_output_with_input(&repo_path, ["upload-pack", "."], &stdin_payload).await?;
+
+        Ok(build_stream_response(SshUploadPackResponse {
+            stdout: output.stdout,
+            stderr: output.stderr,
+            exit_status: Some(ExitStatus {
+                value: output.status.code().unwrap_or(1),
+            }),
+        }))
     }
 
     async fn ssh_receive_pack(

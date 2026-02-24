@@ -18,6 +18,7 @@ members = [
   "crates/gitaly-error",
   "crates/gitaly-server",
   "crates/gitaly-proto",
+  "crates/gitaly-gateway",
 ]
 resolver = "2"
 
@@ -28,6 +29,7 @@ rust-version = "1.83"
 
 [workspace.dependencies]
 anyhow = "1.0"
+axum = "0.8"
 base64 = "0.22"
 hmac = "0.12"
 prost = "0.13"
@@ -42,6 +44,9 @@ tonic = "0.12"
 tonic-build = "0.12"
 prost-build = "0.13"
 toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+russh = "0.57"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

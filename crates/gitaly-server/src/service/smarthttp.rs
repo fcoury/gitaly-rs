@@ -176,6 +176,7 @@ fn unimplemented_smart_http_rpc(method: &str) -> Status {
 impl SmartHttpService for SmartHttpServiceImpl {
     type InfoRefsUploadPackStream = ServiceStream<InfoRefsResponse>;
     type InfoRefsReceivePackStream = ServiceStream<InfoRefsResponse>;
+    type PostUploadPackStream = ServiceStream<PostUploadPackResponse>;
     type PostReceivePackStream = ServiceStream<PostReceivePackResponse>;
 
     async fn info_refs_upload_pack(
@@ -237,6 +238,48 @@ impl SmartHttpService for SmartHttpServiceImpl {
         ))
     }
 
+    async fn post_upload_pack(
+        &self,
+        request: Request<tonic::Streaming<PostUploadPackRequest>>,
+    ) -> Result<Response<Self::PostUploadPackStream>, Status> {
+        let mut stream = request.into_inner();
+        let mut repository = None;
+        let mut payload = Vec::new();
+
+        while let Some(message) = stream
+            .message()
+            .await
+            .map_err(|err| Status::invalid_argument(format!("invalid request stream: {err}")))?
+        {
+            if repository.is_none() {
+                repository = message.repository;
+            }
+
+            if !message.data.is_empty() {
+                payload.extend_from_slice(&message.data);
+            }
+        }
+
+        let repo_path = self.resolve_repo_path(repository)?;
+        let output = git_output_with_input(
+            &repo_path,
+            ["upload-pack", "--stateless-rpc", "."],
+            &payload,
+        )
+        .await?;
+
+        if !output.status.success() {
+            return Err(status_for_git_failure(
+                "-C <repo> upload-pack --stateless-rpc .",
+                &output,
+            ));
+        }
+
+        Ok(stream_bytes(output.stdout, |data| PostUploadPackResponse {
+            data,
+        }))
+    }
+
     async fn post_receive_pack(
         &self,
         request: Request<tonic::Streaming<PostReceivePackRequest>>,
@@ -293,8 +336,8 @@ mod tests {
     use tokio::task::JoinHandle;
     use tokio::time::sleep;
     use tokio_stream::StreamExt;
-    use tonic::Code;
     use tonic::transport::Channel;
+    use tonic::Code;
 
     use gitaly_proto::gitaly::smart_http_service_client::SmartHttpServiceClient;
     use gitaly_proto::gitaly::smart_http_service_server::SmartHttpServiceServer;
@@ -487,10 +530,7 @@ mod tests {
         match client.post_receive_pack(request_stream).await {
             Ok(response) => {
                 let mut stream = response.into_inner();
-                let _ = stream
-                    .message()
-                    .await
-                    .expect("stream read should succeed");
+                let _ = stream.message().await.expect("stream read should succeed");
             }
             Err(status) => {
                 assert_ne!(status.code(), Code::Unimplemented);

@@ -136,8 +136,60 @@ where
         .map_err(|err| Status::internal(format!("failed to await git command: {err}")))
 }
 
-fn unimplemented_ssh_rpc(method: &'static str) -> Status {
-    Status::unimplemented(format!("SshService::{method} is not implemented"))
+fn parse_packfile_negotiation_statistics(stdout: &[u8]) -> PackfileNegotiationStatistics {
+    let mut payload_size = 0_i64;
+    let mut packets = 0_i64;
+    let mut caps = Vec::new();
+
+    let mut offset = 0_usize;
+    while offset + 4 <= stdout.len() {
+        let header = &stdout[offset..offset + 4];
+        let Ok(header) = std::str::from_utf8(header) else {
+            break;
+        };
+        let Ok(packet_len) = usize::from_str_radix(header, 16) else {
+            break;
+        };
+        offset += 4;
+        packets = packets.saturating_add(1);
+
+        if packet_len == 0 {
+            continue;
+        }
+        if packet_len < 4 {
+            break;
+        }
+        let payload_len = packet_len - 4;
+        if offset + payload_len > stdout.len() {
+            break;
+        }
+
+        let payload = &stdout[offset..offset + payload_len];
+        payload_size =
+            payload_size.saturating_add(i64::try_from(payload.len()).unwrap_or(i64::MAX));
+        if caps.is_empty() {
+            if let Some(separator) = payload.iter().position(|byte| *byte == 0) {
+                let cap_text = String::from_utf8_lossy(&payload[separator + 1..]);
+                caps = cap_text
+                    .split_whitespace()
+                    .map(|capability| capability.to_string())
+                    .collect();
+            }
+        }
+
+        offset += payload_len;
+    }
+
+    PackfileNegotiationStatistics {
+        payload_size,
+        packets,
+        caps,
+        wants: 0,
+        haves: 0,
+        shallows: 0,
+        deepen: String::new(),
+        filter: String::new(),
+    }
 }
 
 #[tonic::async_trait]
@@ -148,9 +200,53 @@ impl SshService for SshServiceImpl {
 
     async fn ssh_upload_pack_with_sidechannel(
         &self,
-        _request: Request<SshUploadPackWithSidechannelRequest>,
+        request: Request<SshUploadPackWithSidechannelRequest>,
     ) -> Result<Response<SshUploadPackWithSidechannelResponse>, Status> {
-        Err(unimplemented_ssh_rpc("ssh_upload_pack_with_sidechannel"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        if !repo_path.exists() {
+            return Err(Status::not_found("repository does not exist"));
+        }
+
+        let mut command = Command::new("git");
+        command.arg("-C").arg(&repo_path);
+        for option in request.git_config_options {
+            if !option.contains('=') {
+                return Err(Status::invalid_argument(
+                    "git_config_options entries must be formatted as key=value",
+                ));
+            }
+            command.arg("-c").arg(option);
+        }
+
+        let git_protocol = request.git_protocol.trim();
+        if !git_protocol.is_empty() {
+            command.env("GIT_PROTOCOL", git_protocol);
+        }
+
+        command
+            .arg("upload-pack")
+            .arg("--stateless-rpc")
+            .arg("--advertise-refs")
+            .arg(".");
+
+        let output = command
+            .output()
+            .await
+            .map_err(|err| Status::internal(format!("failed to execute git upload-pack: {err}")))?;
+
+        if !output.status.success() {
+            return Err(Status::internal(format!(
+                "git upload-pack --stateless-rpc --advertise-refs failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+
+        Ok(Response::new(SshUploadPackWithSidechannelResponse {
+            packfile_negotiation_statistics: Some(parse_packfile_negotiation_statistics(
+                &output.stdout,
+            )),
+        }))
     }
 
     async fn ssh_upload_pack(
@@ -493,6 +589,7 @@ impl SshService for SshServiceImpl {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::process::Command;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -555,26 +652,107 @@ mod tests {
         join_result.expect("server task should not panic");
     }
 
+    fn unique_dir(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock drift")
+            .as_nanos();
+        std::env::temp_dir().join(format!("gitaly-rs-ssh-{name}-{nanos}"))
+    }
+
+    fn init_bare_repo(path: &std::path::Path) {
+        let output = Command::new("git")
+            .arg("init")
+            .arg("--bare")
+            .arg(path)
+            .output()
+            .expect("git init --bare should execute");
+        assert!(
+            output.status.success(),
+            "git init --bare {} failed\nstdout: {}\nstderr: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn test_dependencies_with_storage(storage_root: std::path::PathBuf) -> Arc<Dependencies> {
+        let mut storage_paths = HashMap::new();
+        storage_paths.insert("default".to_string(), storage_root);
+        Arc::new(Dependencies::default().with_storage_paths(storage_paths))
+    }
+
     fn test_dependencies() -> Arc<Dependencies> {
         let mut storage_paths = HashMap::new();
         storage_paths.insert("default".to_string(), std::env::temp_dir());
-
         Arc::new(Dependencies::default().with_storage_paths(storage_paths))
     }
 
     #[tokio::test]
-    async fn unimplemented_methods_return_unimplemented_status() {
+    async fn ssh_upload_pack_with_sidechannel_returns_negotiation_statistics() {
+        let storage_root = unique_dir("sidechannel-upload-pack");
+        let repo_path = storage_root.join("group/project.git");
+        std::fs::create_dir_all(repo_path.parent().expect("repo parent should exist"))
+            .expect("storage hierarchy should be creatable");
+        init_bare_repo(&repo_path);
+
+        let dependencies = test_dependencies_with_storage(storage_root.clone());
         let (endpoint, shutdown_tx, server_task) =
-            start_server(SshServiceImpl::new(test_dependencies())).await;
+            start_server(SshServiceImpl::new(dependencies)).await;
         let mut client = connect_client(endpoint).await;
 
-        let upload_pack_error = client
-            .ssh_upload_pack_with_sidechannel(SshUploadPackWithSidechannelRequest::default())
+        let response = client
+            .ssh_upload_pack_with_sidechannel(SshUploadPackWithSidechannelRequest {
+                repository: Some(Repository {
+                    storage_name: "default".to_string(),
+                    relative_path: "group/project.git".to_string(),
+                    ..Repository::default()
+                }),
+                git_config_options: vec!["uploadpack.allowReachableSHA1InWant=true".to_string()],
+                git_protocol: "version=2".to_string(),
+            })
             .await
-            .expect_err("ssh_upload_pack_with_sidechannel should be unimplemented");
-        assert_eq!(upload_pack_error.code(), Code::Unimplemented);
+            .expect("ssh_upload_pack_with_sidechannel should succeed")
+            .into_inner();
+        assert!(response.packfile_negotiation_statistics.is_some());
 
         shutdown_server(shutdown_tx, server_task).await;
+        if storage_root.exists() {
+            let _ = std::fs::remove_dir_all(storage_root);
+        }
+    }
+
+    #[tokio::test]
+    async fn ssh_upload_pack_with_sidechannel_rejects_invalid_git_config() {
+        let storage_root = unique_dir("sidechannel-invalid-config");
+        let repo_path = storage_root.join("group/project.git");
+        std::fs::create_dir_all(repo_path.parent().expect("repo parent should exist"))
+            .expect("storage hierarchy should be creatable");
+        init_bare_repo(&repo_path);
+
+        let dependencies = test_dependencies_with_storage(storage_root.clone());
+        let (endpoint, shutdown_tx, server_task) =
+            start_server(SshServiceImpl::new(dependencies)).await;
+        let mut client = connect_client(endpoint).await;
+
+        let status = client
+            .ssh_upload_pack_with_sidechannel(SshUploadPackWithSidechannelRequest {
+                repository: Some(Repository {
+                    storage_name: "default".to_string(),
+                    relative_path: "group/project.git".to_string(),
+                    ..Repository::default()
+                }),
+                git_config_options: vec!["invalid-config".to_string()],
+                git_protocol: String::new(),
+            })
+            .await
+            .expect_err("invalid git_config_options should fail");
+        assert_eq!(status.code(), Code::InvalidArgument);
+
+        shutdown_server(shutdown_tx, server_task).await;
+        if storage_root.exists() {
+            let _ = std::fs::remove_dir_all(storage_root);
+        }
     }
 
     #[tokio::test]
@@ -616,7 +794,10 @@ mod tests {
                 saw_exit_status = true;
             }
         }
-        assert!(saw_exit_status, "expected at least one response with exit_status");
+        assert!(
+            saw_exit_status,
+            "expected at least one response with exit_status"
+        );
 
         shutdown_server(shutdown_tx, server_task).await;
     }

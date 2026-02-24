@@ -107,13 +107,19 @@ where
     stream_from_values(chunks)
 }
 
-async fn git_output<I, S>(repo_path: &Path, args: I) -> Result<std::process::Output, Status>
+async fn git_output_with_options<I, S>(
+    repo_path: &Path,
+    args: I,
+    git_config_options: &[String],
+    git_protocol: &str,
+) -> Result<std::process::Output, Status>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
     let mut command = Command::new("git");
     command.arg("-C").arg(repo_path);
+    apply_git_command_options(&mut command, git_config_options, git_protocol)?;
     for arg in args {
         command.arg(arg.as_ref());
     }
@@ -223,9 +229,11 @@ impl SmartHttpService for SmartHttpServiceImpl {
         let request = request.into_inner();
         let repo_path = self.resolve_repo_path(request.repository)?;
 
-        let output = git_output(
+        let output = git_output_with_options(
             &repo_path,
             ["upload-pack", "--stateless-rpc", "--advertise-refs", "."],
+            &request.git_config_options,
+            &request.git_protocol,
         )
         .await?;
 
@@ -248,9 +256,11 @@ impl SmartHttpService for SmartHttpServiceImpl {
         let request = request.into_inner();
         let repo_path = self.resolve_repo_path(request.repository)?;
 
-        let output = git_output(
+        let output = git_output_with_options(
             &repo_path,
             ["receive-pack", "--stateless-rpc", "--advertise-refs", "."],
+            &request.git_config_options,
+            &request.git_protocol,
         )
         .await?;
 
@@ -597,6 +607,42 @@ mod tests {
                 .any(|window| window == b"refs/heads/"),
             "advertised refs should include a heads reference"
         );
+
+        if storage_root.exists() {
+            std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
+        }
+    }
+
+    #[tokio::test]
+    async fn info_refs_rejects_invalid_git_config_options() {
+        let storage_root = unique_dir("smarthttp-info-refs-invalid-config");
+        let repo_path = storage_root.join("project.git");
+
+        std::fs::create_dir_all(&storage_root).expect("storage root should be creatable");
+        std::fs::create_dir_all(&repo_path).expect("repo path should be creatable");
+        run_git(&repo_path, &["init", "--bare", "--quiet"]);
+
+        let mut storage_paths = HashMap::new();
+        storage_paths.insert("default".to_string(), storage_root.clone());
+        let dependencies = Arc::new(Dependencies::default().with_storage_paths(storage_paths));
+        let service = SmartHttpServiceImpl::new(dependencies);
+
+        let result = service
+            .info_refs_upload_pack(Request::new(InfoRefsRequest {
+                repository: Some(Repository {
+                    storage_name: "default".to_string(),
+                    relative_path: "project.git".to_string(),
+                    ..Repository::default()
+                }),
+                git_config_options: vec!["invalid".to_string()],
+                git_protocol: String::new(),
+            }))
+            .await;
+        let err = match result {
+            Ok(_) => panic!("invalid git_config_options should fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code(), Code::InvalidArgument);
 
         if storage_root.exists() {
             std::fs::remove_dir_all(storage_root).expect("storage root should be removable");

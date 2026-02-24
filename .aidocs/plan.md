@@ -18,7 +18,7 @@ Last updated: 2026-02-24
 - Phase 4: partial (load/stress gate pending)
 - Phase 5: partial (middleware baseline implemented, broader observability still pending)
 - Phase 6: done
-- Phase 7: partial (write semantics mostly scaffold)
+- Phase 7: mostly done
 - Phase 8: partial (many RPC/tooling gaps)
 - Phase 9: not started
 - Phase 10: not started (planned root test hierarchy missing)
@@ -35,27 +35,27 @@ Last updated: 2026-02-24
 | T02c | Implement remaining BlobService read RPCs | `service/blob.rs` | done | Implemented list-all and LFS pointer RPCs with focused service tests |
 | T02d | Implement remaining CommitService read RPCs | `service/commit.rs` | done | Implemented remaining read RPCs with git-backed baselines and focused tests |
 | T02e | Implement SSH sidechannel read RPC baseline | `service/ssh.rs` | done | Implemented unary sidechannel baseline with negotiation stats parsing and validation |
-| T03 | Implement real write semantics in hook and operation flows | `service/{hook,operations,smarthttp,ssh}.rs` + `gitaly-git` | in_progress | Split into focused slices for deterministic commits |
+| T03 | Implement real write semantics in hook and operation flows | `service/{hook,operations,smarthttp,ssh}.rs` + `gitaly-git` | done | Completed slices T03a–T03d for baseline write-path semantics |
 | T03a | Implement SmartHTTP upload-pack sidechannel write-path baseline | `service/smarthttp.rs` | done | Added sidechannel upload-pack execution with request validation and negotiation stats |
 | T03b | Harden OperationService mutation RPC semantics | `service/operations.rs` | done | Added repository contract checks for unary/streaming mutation RPCs with focused tests |
 | T03c | Wire git protocol/config options for streaming pack RPCs | `service/{ssh,smarthttp}.rs` | done | Applied validated git config/protocol handling in streaming SSH/SmartHTTP pack flows |
-| T03d | Align remaining write-path command option handling | `service/{smarthttp,ssh}.rs` | in_progress | Extend config/protocol handling to remaining related RPC flows |
-| T04 | Finish remote and repository remaining RPC surface | `service/{remote,repository}.rs` | pending | Remaining `unimplemented` methods |
+| T03d | Align remaining write-path command option handling | `service/{smarthttp,ssh}.rs` | done | Added info-refs and streaming option propagation with validation tests |
+| T04 | Finish remote and repository remaining RPC surface | `service/{remote,repository}.rs` | in_progress | Remaining `unimplemented` methods |
 | T05 | Add missing binaries and packaging path | `bins/*`, workspace wiring | pending | `gitaly-hooks`, `gitaly-ssh`, then backup/gpg/lfs/blackbox |
 | T06 | Build root integration/chaos/stress test layout | `tests/*`, `benches/*` | pending | Create planned hierarchy and first end-to-end suites |
 | T07 | Introduce `gitaly-cluster` and real raft integration | `crates/gitaly-cluster`, `service/raft.rs` | pending | Move from placeholder service to `openraft`-backed cluster state |
 
 ## Current Task Detail
 
-### T03d - Align remaining write-path command option handling
+### T04 - Finish remote and repository remaining RPC surface
 
 Subtasks:
-- Audit remaining pack/write-adjacent RPCs for option propagation gaps.
-- Apply validated `git_config_options`/`git_protocol` handling where missing.
-- Add focused tests for each updated RPC path.
+- Implement remaining `RemoteService` stubs.
+- Implement remaining `RepositoryService` stubs.
+- Add focused tests for each newly implemented RPC cluster.
 
 Verification target:
-- `cargo test -p gitaly-server --lib service::{ssh,smarthttp,hook}:: -- --test-threads=1`
+- `cargo test -p gitaly-server --lib service::{remote,repository}:: -- --test-threads=1`
 
 ## Changelog
 
@@ -71,3 +71,5 @@ Verification target:
 - 2026-02-24: Completed T03a by implementing SmartHTTP sidechannel upload-pack baseline and focused tests.
 - 2026-02-24: Completed T03b by adding OperationService mutation repository validation and contract tests.
 - 2026-02-24: Completed T03c by wiring validated git protocol/config options in streaming SSH and SmartHTTP pack RPCs.
+- 2026-02-24: Completed T03d by applying option handling to remaining SmartHTTP write-adjacent RPCs.
+- 2026-02-24: Marked T03 complete and started T04 remote/repository RPC closure phase.

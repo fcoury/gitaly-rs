@@ -104,10 +104,6 @@ where
     Response::new(Box::pin(tokio_stream::iter(items.into_iter().map(Ok))))
 }
 
-fn unimplemented_blob_rpc(method: &'static str) -> Status {
-    Status::unimplemented(format!("BlobService::{method} is not implemented"))
-}
-
 fn decode_utf8(field: &'static str, bytes: Vec<u8>) -> Result<String, Status> {
     String::from_utf8(bytes)
         .map_err(|_| Status::invalid_argument(format!("{field} must be valid UTF-8")))
@@ -290,6 +286,92 @@ async fn git_mode_for_revision_path(
         .unwrap_or(0);
 
     Ok(mode)
+}
+
+fn parse_lfs_pointer(data: &[u8]) -> Option<(Vec<u8>, i64)> {
+    let text = std::str::from_utf8(data).ok()?;
+    let mut saw_version = false;
+    let mut file_oid: Option<Vec<u8>> = None;
+    let mut file_size: Option<i64> = None;
+
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() {
+            continue;
+        }
+
+        if line == "version https://git-lfs.github.com/spec/v1" {
+            saw_version = true;
+            continue;
+        }
+
+        if let Some(oid) = line.strip_prefix("oid sha256:") {
+            if !oid.is_empty() {
+                file_oid = Some(oid.as_bytes().to_vec());
+            }
+            continue;
+        }
+
+        if let Some(size) = line.strip_prefix("size ") {
+            if let Ok(parsed) = size.parse::<i64>() {
+                file_size = Some(parsed);
+            }
+        }
+    }
+
+    if !saw_version {
+        return None;
+    }
+
+    Some((file_oid?, file_size?))
+}
+
+async fn lfs_pointer_for_oid(repo_path: &Path, oid: &str) -> Result<Option<LfsPointer>, Status> {
+    let object_type = git_cat_file_type(repo_path, oid).await?;
+    if object_type != "blob" {
+        return Ok(None);
+    }
+
+    let size = git_cat_file_size(repo_path, oid).await?;
+    let data = git_cat_file_data(repo_path, oid, -1).await?;
+    let Some((file_oid, file_size)) = parse_lfs_pointer(&data) else {
+        return Ok(None);
+    };
+
+    Ok(Some(LfsPointer {
+        size,
+        data,
+        oid: oid.to_string(),
+        file_size,
+        file_oid,
+    }))
+}
+
+async fn list_all_blob_oids(repo_path: &Path) -> Result<Vec<String>, Status> {
+    let output = git_output(
+        repo_path,
+        [
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check=%(objectname) %(objecttype)",
+        ],
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(status_for_git_failure(
+            "-C <repo> cat-file --batch-all-objects --batch-check",
+            &output,
+        ));
+    }
+
+    Ok(parse_output_lines(&output.stdout)
+        .into_iter()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let oid = parts.next()?;
+            let object_type = parts.next()?;
+            (object_type == "blob").then(|| oid.to_string())
+        })
+        .collect())
 }
 
 #[tonic::async_trait]
@@ -506,30 +588,164 @@ impl BlobService for BlobServiceImpl {
 
     async fn list_all_blobs(
         &self,
-        _request: Request<ListAllBlobsRequest>,
+        request: Request<ListAllBlobsRequest>,
     ) -> Result<Response<Self::ListAllBlobsStream>, Status> {
-        Err(unimplemented_blob_rpc("list_all_blobs"))
+        let request = request.into_inner();
+        if request.bytes_limit < -1 {
+            return Err(Status::invalid_argument("bytes_limit must be >= -1"));
+        }
+
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        if !repo_path.exists() {
+            return Err(Status::not_found("repository does not exist"));
+        }
+
+        let all_blob_oids = list_all_blob_oids(&repo_path).await?;
+        let mut blobs = Vec::new();
+        let limit = usize::try_from(request.limit).unwrap_or(usize::MAX);
+
+        for oid in all_blob_oids {
+            let size = git_cat_file_size(&repo_path, &oid).await?;
+            let data = git_cat_file_data(&repo_path, &oid, request.bytes_limit).await?;
+
+            blobs.push(list_all_blobs_response::Blob { oid, size, data });
+
+            if limit > 0 && blobs.len() >= limit {
+                break;
+            }
+        }
+
+        Ok(build_stream_response(ListAllBlobsResponse { blobs }))
     }
 
     async fn get_lfs_pointers(
         &self,
-        _request: Request<GetLfsPointersRequest>,
+        request: Request<GetLfsPointersRequest>,
     ) -> Result<Response<Self::GetLFSPointersStream>, Status> {
-        Err(unimplemented_blob_rpc("get_lfs_pointers"))
+        let request = request.into_inner();
+        if request.blob_ids.is_empty() {
+            return Err(Status::invalid_argument(
+                "blob_ids must contain at least one blob ID",
+            ));
+        }
+
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        if !repo_path.exists() {
+            return Err(Status::not_found("repository does not exist"));
+        }
+
+        let mut lfs_pointers = Vec::new();
+        for blob_id in request.blob_ids {
+            if blob_id.trim().is_empty() {
+                return Err(Status::invalid_argument(
+                    "blob_ids entries must not be empty",
+                ));
+            }
+
+            if let Some(pointer) = lfs_pointer_for_oid(&repo_path, &blob_id).await? {
+                lfs_pointers.push(pointer);
+            }
+        }
+
+        Ok(build_stream_response(GetLfsPointersResponse {
+            lfs_pointers,
+        }))
     }
 
     async fn list_lfs_pointers(
         &self,
-        _request: Request<ListLfsPointersRequest>,
+        request: Request<ListLfsPointersRequest>,
     ) -> Result<Response<Self::ListLFSPointersStream>, Status> {
-        Err(unimplemented_blob_rpc("list_lfs_pointers"))
+        let request = request.into_inner();
+        if request.revisions.is_empty() {
+            return Err(Status::invalid_argument(
+                "revisions must contain at least one revision",
+            ));
+        }
+        if request.limit < 0 {
+            return Err(Status::invalid_argument("limit must be >= 0"));
+        }
+
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        if !repo_path.exists() {
+            return Err(Status::not_found("repository does not exist"));
+        }
+
+        let mut args = vec!["rev-list".to_string(), "--objects".to_string()];
+        args.extend(request.revisions);
+
+        let rev_list_output = git_output(&repo_path, args.iter().map(String::as_str)).await?;
+        if !rev_list_output.status.success() {
+            if is_invalid_revision_error(&rev_list_output)
+                || is_missing_object_error(&rev_list_output)
+            {
+                return Err(Status::invalid_argument(
+                    "one or more revisions could not be resolved",
+                ));
+            }
+
+            return Err(status_for_git_failure(
+                "-C <repo> rev-list --objects",
+                &rev_list_output,
+            ));
+        }
+
+        let mut seen = HashSet::new();
+        let mut lfs_pointers = Vec::new();
+        let limit = usize::try_from(request.limit).unwrap_or(usize::MAX);
+
+        for line in parse_output_lines(&rev_list_output.stdout) {
+            let oid = line.split_once(' ').map_or_else(
+                || line.trim().to_string(),
+                |(oid, _)| oid.trim().to_string(),
+            );
+            if oid.is_empty() || !seen.insert(oid.clone()) {
+                continue;
+            }
+
+            if let Some(pointer) = lfs_pointer_for_oid(&repo_path, &oid).await? {
+                lfs_pointers.push(pointer);
+                if limit > 0 && lfs_pointers.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        Ok(build_stream_response(ListLfsPointersResponse {
+            lfs_pointers,
+        }))
     }
 
     async fn list_all_lfs_pointers(
         &self,
-        _request: Request<ListAllLfsPointersRequest>,
+        request: Request<ListAllLfsPointersRequest>,
     ) -> Result<Response<Self::ListAllLFSPointersStream>, Status> {
-        Err(unimplemented_blob_rpc("list_all_lfs_pointers"))
+        let request = request.into_inner();
+        if request.limit < 0 {
+            return Err(Status::invalid_argument("limit must be >= 0"));
+        }
+
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        if !repo_path.exists() {
+            return Err(Status::not_found("repository does not exist"));
+        }
+
+        let all_blob_oids = list_all_blob_oids(&repo_path).await?;
+        let mut lfs_pointers = Vec::new();
+        let limit = usize::try_from(request.limit).unwrap_or(usize::MAX);
+
+        for oid in all_blob_oids {
+            if let Some(pointer) = lfs_pointer_for_oid(&repo_path, &oid).await? {
+                lfs_pointers.push(pointer);
+                if limit > 0 && lfs_pointers.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        Ok(build_stream_response(ListAllLfsPointersResponse {
+            lfs_pointers,
+        }))
     }
 }
 
@@ -546,7 +762,9 @@ mod tests {
     use gitaly_proto::gitaly::blob_service_server::BlobService;
     use gitaly_proto::gitaly::get_blobs_request::RevisionPath;
     use gitaly_proto::gitaly::{
-        GetBlobRequest, GetBlobsRequest, ListBlobsRequest, ObjectType, Repository,
+        GetBlobRequest, GetBlobsRequest, GetLfsPointersRequest, ListAllBlobsRequest,
+        ListAllLfsPointersRequest, ListBlobsRequest, ListLfsPointersRequest, ObjectType,
+        Repository,
     };
 
     use crate::dependencies::Dependencies;
@@ -602,6 +820,7 @@ mod tests {
 
     struct TestRepo {
         storage_root: std::path::PathBuf,
+        repo_path: std::path::PathBuf,
         repository: Repository,
         service: BlobServiceImpl,
         blob_oid: String,
@@ -647,6 +866,7 @@ mod tests {
 
             Self {
                 storage_root,
+                repo_path,
                 repository,
                 service,
                 blob_oid,
@@ -802,5 +1022,97 @@ mod tests {
             .err()
             .expect("invalid repository path should return error");
         assert_eq!(status.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn list_all_blobs_and_lfs_pointer_methods_return_expected_data() {
+        let test_repo = TestRepo::setup("blob-service-all-and-lfs");
+        let lfs_pointer_data = b"version https://git-lfs.github.com/spec/v1\noid sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nsize 123\n";
+
+        std::fs::write(test_repo.repo_path.join("pointer.lfs"), lfs_pointer_data)
+            .expect("pointer file should write");
+        run_git(&test_repo.repo_path, &["add", "pointer.lfs"]);
+        run_git(
+            &test_repo.repo_path,
+            &["commit", "--quiet", "-m", "add lfs pointer"],
+        );
+        let lfs_oid = run_git_stdout(&test_repo.repo_path, &["rev-parse", "HEAD:pointer.lfs"]);
+
+        let mut list_all_blobs_stream = test_repo
+            .service
+            .list_all_blobs(Request::new(ListAllBlobsRequest {
+                repository: Some(test_repo.repository.clone()),
+                limit: 0,
+                bytes_limit: -1,
+            }))
+            .await
+            .expect("list_all_blobs should succeed")
+            .into_inner();
+        let list_all_blobs_response = list_all_blobs_stream
+            .next()
+            .await
+            .expect("list_all_blobs should return one response")
+            .expect("list_all_blobs response should not error");
+        assert!(list_all_blobs_response
+            .blobs
+            .iter()
+            .any(|blob| blob.oid == test_repo.blob_oid));
+        assert!(list_all_blobs_response
+            .blobs
+            .iter()
+            .any(|blob| blob.oid == lfs_oid));
+
+        let mut get_lfs_pointers_stream = test_repo
+            .service
+            .get_lfs_pointers(Request::new(GetLfsPointersRequest {
+                repository: Some(test_repo.repository.clone()),
+                blob_ids: vec![test_repo.blob_oid.clone(), lfs_oid.clone()],
+            }))
+            .await
+            .expect("get_lfs_pointers should succeed")
+            .into_inner();
+        let get_lfs_pointers_response = get_lfs_pointers_stream
+            .next()
+            .await
+            .expect("get_lfs_pointers should return one response")
+            .expect("get_lfs_pointers response should not error");
+        assert_eq!(get_lfs_pointers_response.lfs_pointers.len(), 1);
+        assert_eq!(get_lfs_pointers_response.lfs_pointers[0].oid, lfs_oid);
+        assert_eq!(get_lfs_pointers_response.lfs_pointers[0].file_size, 123);
+
+        let mut list_lfs_pointers_stream = test_repo
+            .service
+            .list_lfs_pointers(Request::new(ListLfsPointersRequest {
+                repository: Some(test_repo.repository.clone()),
+                revisions: vec!["HEAD".to_string()],
+                limit: 10,
+            }))
+            .await
+            .expect("list_lfs_pointers should succeed")
+            .into_inner();
+        let list_lfs_pointers_response = list_lfs_pointers_stream
+            .next()
+            .await
+            .expect("list_lfs_pointers should return one response")
+            .expect("list_lfs_pointers response should not error");
+        assert_eq!(list_lfs_pointers_response.lfs_pointers.len(), 1);
+        assert_eq!(list_lfs_pointers_response.lfs_pointers[0].oid, lfs_oid);
+
+        let mut list_all_lfs_pointers_stream = test_repo
+            .service
+            .list_all_lfs_pointers(Request::new(ListAllLfsPointersRequest {
+                repository: Some(test_repo.repository.clone()),
+                limit: 10,
+            }))
+            .await
+            .expect("list_all_lfs_pointers should succeed")
+            .into_inner();
+        let list_all_lfs_pointers_response = list_all_lfs_pointers_stream
+            .next()
+            .await
+            .expect("list_all_lfs_pointers should return one response")
+            .expect("list_all_lfs_pointers response should not error");
+        assert_eq!(list_all_lfs_pointers_response.lfs_pointers.len(), 1);
+        assert_eq!(list_all_lfs_pointers_response.lfs_pointers[0].oid, lfs_oid);
     }
 }

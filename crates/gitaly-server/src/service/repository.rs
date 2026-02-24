@@ -91,6 +91,11 @@ fn parse_output_lines(stdout: &[u8]) -> Vec<String> {
         .collect()
 }
 
+fn decode_utf8(field: &'static str, bytes: Vec<u8>) -> Result<String, Status> {
+    String::from_utf8(bytes)
+        .map_err(|_| Status::invalid_argument(format!("{field} must be valid UTF-8")))
+}
+
 fn count_recursive(path: &Path) -> io::Result<u64> {
     if !path.exists() {
         return Ok(0);
@@ -314,16 +319,82 @@ impl RepositoryService for RepositoryServiceImpl {
 
     async fn objects_size(
         &self,
-        _request: Request<tonic::Streaming<ObjectsSizeRequest>>,
+        request: Request<tonic::Streaming<ObjectsSizeRequest>>,
     ) -> Result<Response<ObjectsSizeResponse>, Status> {
-        Err(unimplemented_repository_rpc("objects_size"))
+        let mut stream = request.into_inner();
+        let mut repository = None;
+        let mut revisions = Vec::new();
+
+        while let Some(message) = stream
+            .message()
+            .await
+            .map_err(|err| Status::invalid_argument(format!("invalid request stream: {err}")))?
+        {
+            if repository.is_none() && message.repository.is_some() {
+                repository = message.repository;
+            }
+
+            revisions.extend(
+                message
+                    .revisions
+                    .into_iter()
+                    .map(|revision| decode_utf8("revisions", revision))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+        }
+
+        if revisions.is_empty() {
+            return Err(Status::invalid_argument(
+                "revisions must contain at least one revision",
+            ));
+        }
+
+        let repo_path = self.resolve_repo_path(repository)?;
+        let mut args = vec![
+            "rev-list".to_string(),
+            "--disk-usage".to_string(),
+            "--objects".to_string(),
+        ];
+        args.extend(revisions);
+
+        let output = git_output(&repo_path, args.iter().map(String::as_str)).await?;
+        if !output.status.success() {
+            return Err(status_for_git_failure(
+                "-C <repo> rev-list --disk-usage ...",
+                &output,
+            ));
+        }
+
+        let size = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<u64>()
+            .map_err(|err| Status::internal(format!("failed to parse objects size: {err}")))?;
+
+        Ok(Response::new(ObjectsSizeResponse { size }))
     }
 
     async fn object_format(
         &self,
-        _request: Request<ObjectFormatRequest>,
+        request: Request<ObjectFormatRequest>,
     ) -> Result<Response<ObjectFormatResponse>, Status> {
-        Err(unimplemented_repository_rpc("object_format"))
+        let repo_path = self.resolve_repo_path(request.into_inner().repository)?;
+        let output = git_output(&repo_path, ["rev-parse", "--show-object-format"]).await?;
+        if !output.status.success() {
+            return Err(status_for_git_failure(
+                "-C <repo> rev-parse --show-object-format",
+                &output,
+            ));
+        }
+
+        let format = match String::from_utf8_lossy(&output.stdout).trim() {
+            "sha1" => ObjectFormat::Sha1,
+            "sha256" => ObjectFormat::Sha256,
+            _ => ObjectFormat::Unspecified,
+        };
+
+        Ok(Response::new(ObjectFormatResponse {
+            format: format as i32,
+        }))
     }
 
     async fn fetch_remote(
@@ -389,9 +460,28 @@ impl RepositoryService for RepositoryServiceImpl {
 
     async fn has_local_branches(
         &self,
-        _request: Request<HasLocalBranchesRequest>,
+        request: Request<HasLocalBranchesRequest>,
     ) -> Result<Response<HasLocalBranchesResponse>, Status> {
-        Err(unimplemented_repository_rpc("has_local_branches"))
+        let repo_path = self.resolve_repo_path(request.into_inner().repository)?;
+        let output = git_output(
+            &repo_path,
+            [
+                "for-each-ref",
+                "--format=%(refname)",
+                "--count=1",
+                "refs/heads",
+            ],
+        )
+        .await?;
+        if !output.status.success() {
+            return Err(status_for_git_failure(
+                "-C <repo> for-each-ref --format=%(refname) --count=1 refs/heads",
+                &output,
+            ));
+        }
+
+        let value = !String::from_utf8_lossy(&output.stdout).trim().is_empty();
+        Ok(Response::new(HasLocalBranchesResponse { value }))
     }
 
     async fn fetch_source_branch(
@@ -689,6 +779,7 @@ impl RepositoryService for RepositoryServiceImpl {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::process::Command;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -696,7 +787,8 @@ mod tests {
 
     use gitaly_proto::gitaly::repository_service_server::RepositoryService;
     use gitaly_proto::gitaly::{
-        CreateRepositoryRequest, RemoveRepositoryRequest, Repository, RepositoryExistsRequest,
+        CreateRepositoryRequest, HasLocalBranchesRequest, ObjectFormat, ObjectFormatRequest,
+        RemoveRepositoryRequest, Repository, RepositoryExistsRequest,
     };
 
     use crate::dependencies::Dependencies;
@@ -709,6 +801,23 @@ mod tests {
             .expect("clock drift")
             .as_nanos();
         std::env::temp_dir().join(format!("gitaly-rs-{name}-{nanos}"))
+    }
+
+    fn run_git(repo_path: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(args)
+            .output()
+            .expect("git should execute");
+        assert!(
+            output.status.success(),
+            "git -C {} {} failed\nstdout: {}\nstderr: {}",
+            repo_path.display(),
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[tokio::test]
@@ -760,6 +869,94 @@ mod tests {
             .expect("repository_exists should succeed")
             .into_inner();
         assert!(!exists_response.exists);
+
+        if storage_root.exists() {
+            std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
+        }
+    }
+
+    #[tokio::test]
+    async fn object_format_and_has_local_branches_reflect_repository_state() {
+        let storage_root = unique_dir("repository-service-format-and-branches");
+        std::fs::create_dir_all(&storage_root).expect("storage root should be creatable");
+
+        let mut storage_paths = HashMap::new();
+        storage_paths.insert("default".to_string(), storage_root.clone());
+        let dependencies = Arc::new(Dependencies::default().with_storage_paths(storage_paths));
+        let service = RepositoryServiceImpl::new(dependencies);
+
+        let repository = Repository {
+            storage_name: "default".to_string(),
+            relative_path: "project.git".to_string(),
+            ..Repository::default()
+        };
+
+        service
+            .create_repository(Request::new(CreateRepositoryRequest {
+                repository: Some(repository.clone()),
+                ..CreateRepositoryRequest::default()
+            }))
+            .await
+            .expect("create_repository should succeed");
+
+        let object_format = service
+            .object_format(Request::new(ObjectFormatRequest {
+                repository: Some(repository.clone()),
+            }))
+            .await
+            .expect("object_format should succeed")
+            .into_inner();
+        assert_eq!(object_format.format, ObjectFormat::Sha1 as i32);
+
+        let no_branches = service
+            .has_local_branches(Request::new(HasLocalBranchesRequest {
+                repository: Some(repository.clone()),
+            }))
+            .await
+            .expect("has_local_branches should succeed")
+            .into_inner();
+        assert!(!no_branches.value);
+
+        let source_repo = storage_root.join("source");
+        std::fs::create_dir_all(&source_repo).expect("source repo should be creatable");
+        run_git(&source_repo, &["init", "--quiet"]);
+        run_git(
+            &source_repo,
+            &["config", "user.name", "Repository Service Tests"],
+        );
+        run_git(
+            &source_repo,
+            &[
+                "config",
+                "user.email",
+                "repository-service-tests@example.com",
+            ],
+        );
+        std::fs::write(source_repo.join("README.md"), b"hello\n").expect("README should write");
+        run_git(&source_repo, &["add", "README.md"]);
+        run_git(&source_repo, &["commit", "--quiet", "-m", "initial"]);
+        run_git(&source_repo, &["branch", "-M", "main"]);
+
+        let bare_repo = storage_root.join("project.git");
+        run_git(
+            &source_repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                bare_repo.to_string_lossy().as_ref(),
+            ],
+        );
+        run_git(&source_repo, &["push", "--quiet", "origin", "main"]);
+
+        let has_branches = service
+            .has_local_branches(Request::new(HasLocalBranchesRequest {
+                repository: Some(repository),
+            }))
+            .await
+            .expect("has_local_branches should succeed")
+            .into_inner();
+        assert!(has_branches.value);
 
         if storage_root.exists() {
             std::fs::remove_dir_all(storage_root).expect("storage root should be removable");

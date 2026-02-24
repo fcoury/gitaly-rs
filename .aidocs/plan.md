@@ -43,17 +43,19 @@ Last updated: 2026-02-24
 | T04 | Finish remote and repository remaining RPC surface | `service/{remote,repository}.rs` | in_progress | Split into remote/repository slices for deterministic commits |
 | T04a | Implement remaining RemoteService RPCs | `service/remote.rs` | done | Implemented `update_remote_mirror` baseline with focused tests |
 | T04b | Implement remaining RepositoryService RPCs | `service/repository.rs` | in_progress | Replace remaining `unimplemented` repository RPCs in focused slices |
+| T04b1 | Implement repository format/branch/objects-size basics | `service/repository.rs` | done | Implemented `object_format`, `has_local_branches`, and `objects_size` baselines |
+| T04b2 | Implement repository maintenance and bundle RPC slices | `service/repository.rs` | in_progress | Continue replacing `unimplemented` methods in bounded batches |
 | T05 | Add missing binaries and packaging path | `bins/*`, workspace wiring | pending | `gitaly-hooks`, `gitaly-ssh`, then backup/gpg/lfs/blackbox |
 | T06 | Build root integration/chaos/stress test layout | `tests/*`, `benches/*` | pending | Create planned hierarchy and first end-to-end suites |
 | T07 | Introduce `gitaly-cluster` and real raft integration | `crates/gitaly-cluster`, `service/raft.rs` | pending | Move from placeholder service to `openraft`-backed cluster state |
 
 ## Current Task Detail
 
-### T04b - Implement remaining RepositoryService RPCs
+### T04b2 - Implement repository maintenance and bundle RPC slices
 
 Subtasks:
-- Implement repository RPC stubs in focused batches.
-- Add focused tests for each implemented repository RPC cluster.
+- Implement next bounded batch of repository RPC stubs.
+- Add focused tests for newly implemented RPCs in the batch.
 - Keep backward-compatible default payload behavior where required.
 
 Verification target:
@@ -76,3 +78,4 @@ Verification target:
 - 2026-02-24: Completed T03d by applying option handling to remaining SmartHTTP write-adjacent RPCs.
 - 2026-02-24: Marked T03 complete and started T04 remote/repository RPC closure phase.
 - 2026-02-24: Completed T04a by implementing `update_remote_mirror` baseline and focused remote service tests.
+- 2026-02-24: Completed T04b1 by implementing repository object-format/branch/objects-size baseline RPCs and tests.

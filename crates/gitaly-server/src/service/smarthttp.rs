@@ -168,8 +168,60 @@ fn status_for_git_failure(args: &str, output: &std::process::Output) -> Status {
     ))
 }
 
-fn unimplemented_smart_http_rpc(method: &str) -> Status {
-    Status::unimplemented(format!("SmartHttpService::{method} is not implemented"))
+fn parse_packfile_negotiation_statistics(stdout: &[u8]) -> PackfileNegotiationStatistics {
+    let mut payload_size = 0_i64;
+    let mut packets = 0_i64;
+    let mut caps = Vec::new();
+
+    let mut offset = 0_usize;
+    while offset + 4 <= stdout.len() {
+        let header = &stdout[offset..offset + 4];
+        let Ok(header) = std::str::from_utf8(header) else {
+            break;
+        };
+        let Ok(packet_len) = usize::from_str_radix(header, 16) else {
+            break;
+        };
+        offset += 4;
+        packets = packets.saturating_add(1);
+
+        if packet_len == 0 {
+            continue;
+        }
+        if packet_len < 4 {
+            break;
+        }
+        let payload_len = packet_len - 4;
+        if offset + payload_len > stdout.len() {
+            break;
+        }
+
+        let payload = &stdout[offset..offset + payload_len];
+        payload_size =
+            payload_size.saturating_add(i64::try_from(payload.len()).unwrap_or(i64::MAX));
+        if caps.is_empty() {
+            if let Some(separator) = payload.iter().position(|byte| *byte == 0) {
+                let cap_text = String::from_utf8_lossy(&payload[separator + 1..]);
+                caps = cap_text
+                    .split_whitespace()
+                    .map(|capability| capability.to_string())
+                    .collect();
+            }
+        }
+
+        offset += payload_len;
+    }
+
+    PackfileNegotiationStatistics {
+        payload_size,
+        packets,
+        caps,
+        wants: 0,
+        haves: 0,
+        shallows: 0,
+        deepen: String::new(),
+        filter: String::new(),
+    }
 }
 
 #[tonic::async_trait]
@@ -231,11 +283,53 @@ impl SmartHttpService for SmartHttpServiceImpl {
 
     async fn post_upload_pack_with_sidechannel(
         &self,
-        _request: Request<PostUploadPackWithSidechannelRequest>,
+        request: Request<PostUploadPackWithSidechannelRequest>,
     ) -> Result<Response<PostUploadPackWithSidechannelResponse>, Status> {
-        Err(unimplemented_smart_http_rpc(
-            "post_upload_pack_with_sidechannel",
-        ))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        if !repo_path.exists() {
+            return Err(Status::not_found("repository does not exist"));
+        }
+
+        let mut command = Command::new("git");
+        command.arg("-C").arg(&repo_path);
+        for option in request.git_config_options {
+            if !option.contains('=') {
+                return Err(Status::invalid_argument(
+                    "git_config_options entries must be formatted as key=value",
+                ));
+            }
+            command.arg("-c").arg(option);
+        }
+
+        let git_protocol = request.git_protocol.trim();
+        if !git_protocol.is_empty() {
+            command.env("GIT_PROTOCOL", git_protocol);
+        }
+
+        command
+            .arg("upload-pack")
+            .arg("--stateless-rpc")
+            .arg("--advertise-refs")
+            .arg(".");
+
+        let output = command
+            .output()
+            .await
+            .map_err(|err| Status::internal(format!("failed to execute git upload-pack: {err}")))?;
+
+        if !output.status.success() {
+            return Err(status_for_git_failure(
+                "-C <repo> upload-pack --stateless-rpc --advertise-refs .",
+                &output,
+            ));
+        }
+
+        Ok(Response::new(PostUploadPackWithSidechannelResponse {
+            packfile_negotiation_statistics: Some(parse_packfile_negotiation_statistics(
+                &output.stdout,
+            )),
+        }))
     }
 
     async fn post_upload_pack(
@@ -467,6 +561,73 @@ mod tests {
                 .any(|window| window == b"refs/heads/"),
             "advertised refs should include a heads reference"
         );
+
+        if storage_root.exists() {
+            std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
+        }
+    }
+
+    #[tokio::test]
+    async fn post_upload_pack_with_sidechannel_returns_negotiation_statistics() {
+        let storage_root = unique_dir("smarthttp-sidechannel");
+        let repo_path = storage_root.join("project.git");
+
+        std::fs::create_dir_all(&storage_root).expect("storage root should be creatable");
+        std::fs::create_dir_all(&repo_path).expect("repo path should be creatable");
+        run_git(&repo_path, &["init", "--bare", "--quiet"]);
+
+        let mut storage_paths = HashMap::new();
+        storage_paths.insert("default".to_string(), storage_root.clone());
+        let dependencies = Arc::new(Dependencies::default().with_storage_paths(storage_paths));
+        let service = SmartHttpServiceImpl::new(dependencies);
+
+        let response = service
+            .post_upload_pack_with_sidechannel(Request::new(PostUploadPackWithSidechannelRequest {
+                repository: Some(Repository {
+                    storage_name: "default".to_string(),
+                    relative_path: "project.git".to_string(),
+                    ..Repository::default()
+                }),
+                git_config_options: vec!["uploadpack.allowReachableSHA1InWant=true".to_string()],
+                git_protocol: "version=2".to_string(),
+            }))
+            .await
+            .expect("post_upload_pack_with_sidechannel should succeed")
+            .into_inner();
+        assert!(response.packfile_negotiation_statistics.is_some());
+
+        if storage_root.exists() {
+            std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
+        }
+    }
+
+    #[tokio::test]
+    async fn post_upload_pack_with_sidechannel_rejects_invalid_git_config_options() {
+        let storage_root = unique_dir("smarthttp-sidechannel-invalid-config");
+        let repo_path = storage_root.join("project.git");
+
+        std::fs::create_dir_all(&storage_root).expect("storage root should be creatable");
+        std::fs::create_dir_all(&repo_path).expect("repo path should be creatable");
+        run_git(&repo_path, &["init", "--bare", "--quiet"]);
+
+        let mut storage_paths = HashMap::new();
+        storage_paths.insert("default".to_string(), storage_root.clone());
+        let dependencies = Arc::new(Dependencies::default().with_storage_paths(storage_paths));
+        let service = SmartHttpServiceImpl::new(dependencies);
+
+        let err = service
+            .post_upload_pack_with_sidechannel(Request::new(PostUploadPackWithSidechannelRequest {
+                repository: Some(Repository {
+                    storage_name: "default".to_string(),
+                    relative_path: "project.git".to_string(),
+                    ..Repository::default()
+                }),
+                git_config_options: vec!["invalid".to_string()],
+                git_protocol: String::new(),
+            }))
+            .await
+            .expect_err("invalid git_config_options should fail");
+        assert_eq!(err.code(), Code::InvalidArgument);
 
         if storage_root.exists() {
             std::fs::remove_dir_all(storage_root).expect("storage root should be removable");

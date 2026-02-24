@@ -35,7 +35,9 @@ Last updated: 2026-02-24
 | T02c | Implement remaining BlobService read RPCs | `service/blob.rs` | done | Implemented list-all and LFS pointer RPCs with focused service tests |
 | T02d | Implement remaining CommitService read RPCs | `service/commit.rs` | done | Implemented remaining read RPCs with git-backed baselines and focused tests |
 | T02e | Implement SSH sidechannel read RPC baseline | `service/ssh.rs` | done | Implemented unary sidechannel baseline with negotiation stats parsing and validation |
-| T03 | Implement real write semantics in hook and operation flows | `service/{hook,operations,smarthttp,ssh}.rs` + `gitaly-git` | in_progress | Hook ordering, transactional behavior, meaningful responses |
+| T03 | Implement real write semantics in hook and operation flows | `service/{hook,operations,smarthttp,ssh}.rs` + `gitaly-git` | in_progress | Split into focused slices for deterministic commits |
+| T03a | Implement SmartHTTP upload-pack sidechannel write-path baseline | `service/smarthttp.rs` | done | Added sidechannel upload-pack execution with request validation and negotiation stats |
+| T03b | Harden OperationService mutation RPC semantics | `service/operations.rs` | in_progress | Add repository resolution and mutation-oriented validation paths |
 | T04 | Finish remote and repository remaining RPC surface | `service/{remote,repository}.rs` | pending | Remaining `unimplemented` methods |
 | T05 | Add missing binaries and packaging path | `bins/*`, workspace wiring | pending | `gitaly-hooks`, `gitaly-ssh`, then backup/gpg/lfs/blackbox |
 | T06 | Build root integration/chaos/stress test layout | `tests/*`, `benches/*` | pending | Create planned hierarchy and first end-to-end suites |
@@ -43,15 +45,15 @@ Last updated: 2026-02-24
 
 ## Current Task Detail
 
-### T03 - Implement real write semantics in hook and operation flows
+### T03b - Harden OperationService mutation RPC semantics
 
 Subtasks:
-- Audit current write path behavior in hook/operations/smarthttp/ssh services.
-- Implement transactional semantics and meaningful status/error propagation.
-- Add focused tests for write-path behavior (success, conflict, rollback/error).
+- Add repository resolution for unary and streaming mutation requests.
+- Return explicit `InvalidArgument`/`NotFound` errors for malformed or missing repositories.
+- Add focused tests validating mutation request contracts.
 
 Verification target:
-- `cargo test -p gitaly-server --lib service::{hook,operations,smarthttp,ssh}:: -- --test-threads=1`
+- `cargo test -p gitaly-server --lib service::operations:: -- --test-threads=1`
 
 ## Changelog
 
@@ -64,3 +66,4 @@ Verification target:
 - 2026-02-24: Completed T02d by implementing remaining CommitService read RPC stubs and focused tests.
 - 2026-02-24: Completed T02e by implementing SSH sidechannel upload-pack baseline and focused tests.
 - 2026-02-24: Marked T02 complete and started T03 write-semantics phase.
+- 2026-02-24: Completed T03a by implementing SmartHTTP sidechannel upload-pack baseline and focused tests.

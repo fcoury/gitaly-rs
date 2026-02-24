@@ -3,8 +3,10 @@ use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
@@ -14,6 +16,7 @@ use gitaly_proto::gitaly::*;
 use crate::dependencies::Dependencies;
 
 type ServiceStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
+const STREAM_CHUNK_SIZE: usize = 32 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct SshServiceImpl {
@@ -88,6 +91,15 @@ where
     Response::new(Box::pin(tokio_stream::iter(vec![Ok(response)])))
 }
 
+fn build_channel_stream_response<T>(
+    receiver: mpsc::Receiver<Result<T, Status>>,
+) -> Response<ServiceStream<T>>
+where
+    T: Send + 'static,
+{
+    Response::new(Box::pin(ReceiverStream::new(receiver)))
+}
+
 async fn git_output_with_input<I, S>(
     repo_path: &Path,
     args: I,
@@ -146,32 +158,150 @@ impl SshService for SshServiceImpl {
         request: Request<tonic::Streaming<SshUploadPackRequest>>,
     ) -> Result<Response<Self::SSHUploadPackStream>, Status> {
         let mut stream = request.into_inner();
-        let mut repository_descriptor: Option<Repository> = None;
-        let mut stdin_payload = Vec::new();
-
-        while let Some(message) = stream
+        let mut first_message = stream
             .message()
             .await
             .map_err(|err| Status::invalid_argument(format!("invalid upload-pack stream: {err}")))?
-        {
-            if repository_descriptor.is_none() {
-                repository_descriptor = message.repository;
-            }
-            if !message.stdin.is_empty() {
-                stdin_payload.extend_from_slice(&message.stdin);
-            }
-        }
+            .ok_or_else(|| {
+                Status::invalid_argument("upload-pack stream must contain at least one message")
+            })?;
 
-        let repo_path = self.resolve_repo_path(repository_descriptor)?;
-        let output = git_output_with_input(&repo_path, ["upload-pack", "."], &stdin_payload).await?;
+        let repo_path = self.resolve_repo_path(first_message.repository.take())?;
+        let (response_tx, response_rx) = mpsc::channel(16);
 
-        Ok(build_stream_response(SshUploadPackResponse {
-            stdout: output.stdout,
-            stderr: output.stderr,
-            exit_status: Some(ExitStatus {
-                value: output.status.code().unwrap_or(1),
-            }),
-        }))
+        tokio::spawn(async move {
+            let task_result: Result<(), Status> = async {
+                let mut command = Command::new("git");
+                command
+                    .arg("-C")
+                    .arg(&repo_path)
+                    .arg("upload-pack")
+                    .arg(".")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+
+                let mut child = command.spawn().map_err(|err| {
+                    Status::internal(format!("failed to spawn git upload-pack: {err}"))
+                })?;
+
+                let mut child_stdin = child
+                    .stdin
+                    .take()
+                    .ok_or_else(|| Status::internal("git upload-pack stdin is unavailable"))?;
+                let mut child_stdout = child
+                    .stdout
+                    .take()
+                    .ok_or_else(|| Status::internal("git upload-pack stdout is unavailable"))?;
+                let mut child_stderr = child
+                    .stderr
+                    .take()
+                    .ok_or_else(|| Status::internal("git upload-pack stderr is unavailable"))?;
+
+                let initial_stdin = first_message.stdin;
+                let stdin_task = tokio::spawn(async move {
+                    if !initial_stdin.is_empty() {
+                        child_stdin.write_all(&initial_stdin).await.map_err(|err| {
+                            Status::internal(format!("failed writing upload-pack stdin: {err}"))
+                        })?;
+                    }
+
+                    while let Some(message) = stream.message().await.map_err(|err| {
+                        Status::invalid_argument(format!("invalid upload-pack stream: {err}"))
+                    })? {
+                        if !message.stdin.is_empty() {
+                            child_stdin.write_all(&message.stdin).await.map_err(|err| {
+                                Status::internal(format!(
+                                    "failed writing upload-pack stdin chunk: {err}"
+                                ))
+                            })?;
+                        }
+                    }
+
+                    Ok::<(), Status>(())
+                });
+
+                let stdout_tx = response_tx.clone();
+                let stdout_task = tokio::spawn(async move {
+                    let mut buffer = vec![0_u8; STREAM_CHUNK_SIZE];
+                    loop {
+                        let read = child_stdout.read(&mut buffer).await.map_err(|err| {
+                            Status::internal(format!("failed reading upload-pack stdout: {err}"))
+                        })?;
+                        if read == 0 {
+                            break;
+                        }
+                        if stdout_tx
+                            .send(Ok(SshUploadPackResponse {
+                                stdout: buffer[..read].to_vec(),
+                                ..SshUploadPackResponse::default()
+                            }))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok::<(), Status>(())
+                });
+
+                let stderr_tx = response_tx.clone();
+                let stderr_task = tokio::spawn(async move {
+                    let mut buffer = vec![0_u8; STREAM_CHUNK_SIZE];
+                    loop {
+                        let read = child_stderr.read(&mut buffer).await.map_err(|err| {
+                            Status::internal(format!("failed reading upload-pack stderr: {err}"))
+                        })?;
+                        if read == 0 {
+                            break;
+                        }
+                        if stderr_tx
+                            .send(Ok(SshUploadPackResponse {
+                                stderr: buffer[..read].to_vec(),
+                                ..SshUploadPackResponse::default()
+                            }))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok::<(), Status>(())
+                });
+
+                stdin_task.await.map_err(|err| {
+                    Status::internal(format!("upload-pack stdin task failed: {err}"))
+                })??;
+                stdout_task.await.map_err(|err| {
+                    Status::internal(format!("upload-pack stdout task failed: {err}"))
+                })??;
+                stderr_task.await.map_err(|err| {
+                    Status::internal(format!("upload-pack stderr task failed: {err}"))
+                })??;
+
+                let status = child.wait().await.map_err(|err| {
+                    Status::internal(format!("failed waiting for upload-pack: {err}"))
+                })?;
+
+                let _ = response_tx
+                    .send(Ok(SshUploadPackResponse {
+                        exit_status: Some(ExitStatus {
+                            value: status.code().unwrap_or(1),
+                        }),
+                        ..SshUploadPackResponse::default()
+                    }))
+                    .await;
+
+                Ok(())
+            }
+            .await;
+
+            if let Err(status) = task_result {
+                let _ = response_tx.send(Err(status)).await;
+            }
+        });
+
+        Ok(build_channel_stream_response(response_rx))
     }
 
     async fn ssh_receive_pack(
@@ -179,31 +309,150 @@ impl SshService for SshServiceImpl {
         request: Request<tonic::Streaming<SshReceivePackRequest>>,
     ) -> Result<Response<Self::SSHReceivePackStream>, Status> {
         let mut stream = request.into_inner();
-        let mut repository_descriptor: Option<Repository> = None;
-        let mut stdin_payload = Vec::new();
+        let mut first_message = stream
+            .message()
+            .await
+            .map_err(|err| Status::invalid_argument(format!("invalid receive-pack stream: {err}")))?
+            .ok_or_else(|| {
+                Status::invalid_argument("receive-pack stream must contain at least one message")
+            })?;
 
-        while let Some(message) = stream.message().await.map_err(|err| {
-            Status::invalid_argument(format!("invalid receive-pack stream: {err}"))
-        })? {
-            if repository_descriptor.is_none() {
-                repository_descriptor = message.repository;
+        let repo_path = self.resolve_repo_path(first_message.repository.take())?;
+        let (response_tx, response_rx) = mpsc::channel(16);
+
+        tokio::spawn(async move {
+            let task_result: Result<(), Status> = async {
+                let mut command = Command::new("git");
+                command
+                    .arg("-C")
+                    .arg(&repo_path)
+                    .arg("receive-pack")
+                    .arg(".")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+
+                let mut child = command.spawn().map_err(|err| {
+                    Status::internal(format!("failed to spawn git receive-pack: {err}"))
+                })?;
+
+                let mut child_stdin = child
+                    .stdin
+                    .take()
+                    .ok_or_else(|| Status::internal("git receive-pack stdin is unavailable"))?;
+                let mut child_stdout = child
+                    .stdout
+                    .take()
+                    .ok_or_else(|| Status::internal("git receive-pack stdout is unavailable"))?;
+                let mut child_stderr = child
+                    .stderr
+                    .take()
+                    .ok_or_else(|| Status::internal("git receive-pack stderr is unavailable"))?;
+
+                let initial_stdin = first_message.stdin;
+                let stdin_task = tokio::spawn(async move {
+                    if !initial_stdin.is_empty() {
+                        child_stdin.write_all(&initial_stdin).await.map_err(|err| {
+                            Status::internal(format!("failed writing receive-pack stdin: {err}"))
+                        })?;
+                    }
+
+                    while let Some(message) = stream.message().await.map_err(|err| {
+                        Status::invalid_argument(format!("invalid receive-pack stream: {err}"))
+                    })? {
+                        if !message.stdin.is_empty() {
+                            child_stdin.write_all(&message.stdin).await.map_err(|err| {
+                                Status::internal(format!(
+                                    "failed writing receive-pack stdin chunk: {err}"
+                                ))
+                            })?;
+                        }
+                    }
+
+                    Ok::<(), Status>(())
+                });
+
+                let stdout_tx = response_tx.clone();
+                let stdout_task = tokio::spawn(async move {
+                    let mut buffer = vec![0_u8; STREAM_CHUNK_SIZE];
+                    loop {
+                        let read = child_stdout.read(&mut buffer).await.map_err(|err| {
+                            Status::internal(format!("failed reading receive-pack stdout: {err}"))
+                        })?;
+                        if read == 0 {
+                            break;
+                        }
+                        if stdout_tx
+                            .send(Ok(SshReceivePackResponse {
+                                stdout: buffer[..read].to_vec(),
+                                ..SshReceivePackResponse::default()
+                            }))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok::<(), Status>(())
+                });
+
+                let stderr_tx = response_tx.clone();
+                let stderr_task = tokio::spawn(async move {
+                    let mut buffer = vec![0_u8; STREAM_CHUNK_SIZE];
+                    loop {
+                        let read = child_stderr.read(&mut buffer).await.map_err(|err| {
+                            Status::internal(format!("failed reading receive-pack stderr: {err}"))
+                        })?;
+                        if read == 0 {
+                            break;
+                        }
+                        if stderr_tx
+                            .send(Ok(SshReceivePackResponse {
+                                stderr: buffer[..read].to_vec(),
+                                ..SshReceivePackResponse::default()
+                            }))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok::<(), Status>(())
+                });
+
+                stdin_task.await.map_err(|err| {
+                    Status::internal(format!("receive-pack stdin task failed: {err}"))
+                })??;
+                stdout_task.await.map_err(|err| {
+                    Status::internal(format!("receive-pack stdout task failed: {err}"))
+                })??;
+                stderr_task.await.map_err(|err| {
+                    Status::internal(format!("receive-pack stderr task failed: {err}"))
+                })??;
+
+                let status = child.wait().await.map_err(|err| {
+                    Status::internal(format!("failed waiting for receive-pack: {err}"))
+                })?;
+
+                let _ = response_tx
+                    .send(Ok(SshReceivePackResponse {
+                        exit_status: Some(ExitStatus {
+                            value: status.code().unwrap_or(1),
+                        }),
+                        ..SshReceivePackResponse::default()
+                    }))
+                    .await;
+
+                Ok(())
             }
-            if !message.stdin.is_empty() {
-                stdin_payload.extend_from_slice(&message.stdin);
+            .await;
+
+            if let Err(status) = task_result {
+                let _ = response_tx.send(Err(status)).await;
             }
-        }
+        });
 
-        let repo_path = self.resolve_repo_path(repository_descriptor)?;
-        let output =
-            git_output_with_input(&repo_path, ["receive-pack", "."], &stdin_payload).await?;
-
-        Ok(build_stream_response(SshReceivePackResponse {
-            stdout: output.stdout,
-            stderr: output.stderr,
-            exit_status: Some(ExitStatus {
-                value: output.status.code().unwrap_or(1),
-            }),
-        }))
+        Ok(build_channel_stream_response(response_rx))
     }
 
     async fn ssh_upload_archive(
@@ -357,18 +606,17 @@ mod tests {
             .expect("ssh_receive_pack should succeed")
             .into_inner();
 
-        let first_item = response_stream
+        let mut saw_exit_status = false;
+        while let Some(item) = response_stream
             .message()
             .await
             .expect("stream read should succeed")
-            .expect("expected first response item");
-        assert!(first_item.exit_status.is_some());
-
-        let second_item = response_stream
-            .message()
-            .await
-            .expect("stream read should succeed");
-        assert!(second_item.is_none());
+        {
+            if item.exit_status.is_some() {
+                saw_exit_status = true;
+            }
+        }
+        assert!(saw_exit_status, "expected at least one response with exit_status");
 
         shutdown_server(shutdown_tx, server_task).await;
     }

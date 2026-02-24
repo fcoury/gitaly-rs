@@ -15,9 +15,10 @@ use axum::routing::get;
 use axum::Router;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use russh::server::{Auth, Handler, Msg, Server, Session};
+use russh::server::{Auth, Handle as SshHandle, Handler, Msg, Server, Session};
 use russh::{Channel, ChannelId, CryptoVec};
 use serde::Deserialize;
+use tokio::sync::mpsc;
 use tonic::transport::Channel as GrpcChannel;
 use tonic::Request as GrpcRequest;
 use tonic::Status;
@@ -279,7 +280,7 @@ async fn handle_info_refs(
         }
     };
 
-    let body = collect_info_refs(stream).await?;
+    let body = decorate_info_refs_advertisement(service, collect_info_refs(stream).await?);
     build_ok_response(content_type, body)
 }
 
@@ -382,8 +383,7 @@ struct SshCommand {
 
 #[derive(Debug, Default, Clone)]
 struct SshChannelState {
-    command: Option<SshCommand>,
-    stdin: Vec<u8>,
+    stdin_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
 }
 
 #[derive(Clone)]
@@ -459,15 +459,12 @@ impl Handler for GatewaySshServer {
             }
 
             let offered = offered?;
-            let offered_key = russh::keys::ssh_key::PublicKey::from_openssh(&offered)
-                .map_err(|err| anyhow!("invalid offered public key: {err}"))?;
-
-            let accepted = configured_keys.iter().any(|configured| {
-                russh::keys::ssh_key::PublicKey::from_openssh(configured)
-                    .map(|configured_key| configured_key == offered_key)
-                    .unwrap_or(false)
-            });
-
+            let offered = normalize_public_key_entry(&offered)
+                .ok_or_else(|| anyhow!("invalid offered public key format"))?;
+            let accepted = configured_keys
+                .iter()
+                .filter_map(|configured| normalize_public_key_entry(configured))
+                .any(|configured| configured == offered);
             Ok(if accepted {
                 Auth::Accept
             } else {
@@ -517,7 +514,18 @@ impl Handler for GatewaySshServer {
         };
 
         let state = self.channels.entry(channel).or_default();
-        state.command = Some(command);
+
+        let (stdin_tx, stdin_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        state.stdin_tx = Some(stdin_tx);
+        let session_handle = session.handle();
+        spawn_ssh_proxy_task(
+            Arc::clone(&self.state),
+            command,
+            channel,
+            session_handle,
+            stdin_rx,
+        );
+
         std::future::ready(session.channel_success(channel).map_err(Into::into))
     }
 
@@ -527,110 +535,233 @@ impl Handler for GatewaySshServer {
         data: &[u8],
         _session: &mut Session,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        let state = self.channels.entry(channel).or_default();
-        state.stdin.extend_from_slice(data);
+        if let Some(state) = self.channels.get_mut(&channel) {
+            if let Some(stdin_tx) = &state.stdin_tx {
+                let _ = stdin_tx.send(data.to_vec());
+            }
+        }
         std::future::ready(Ok(()))
     }
 
     fn channel_eof(
         &mut self,
         channel: ChannelId,
-        session: &mut Session,
+        _session: &mut Session,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        let state = self.channels.remove(&channel).unwrap_or_default();
-        let app_state = Arc::clone(&self.state);
-
-        async move {
-            let (stdout, stderr, exit_status) = if let Some(command) = state.command {
-                match proxy_ssh_command(app_state, command, state.stdin).await {
-                    Ok(result) => result,
-                    Err(status) => (
-                        Vec::new(),
-                        format!("gateway proxy error: {}\n", status.message()).into_bytes(),
-                        1,
-                    ),
-                }
-            } else {
-                (Vec::new(), b"missing SSH exec request\n".to_vec(), 1)
-            };
-
-            if !stdout.is_empty() {
-                session.data(channel, CryptoVec::from_slice(&stdout))?;
-            }
-            if !stderr.is_empty() {
-                session.extended_data(channel, 1, CryptoVec::from_slice(&stderr))?;
-            }
-            session.exit_status_request(channel, exit_status)?;
-            session.eof(channel)?;
-            session.close(channel)?;
-            Ok(())
-        }
+        self.channels.remove(&channel);
+        std::future::ready(Ok(()))
     }
 }
 
-async fn proxy_ssh_command(
+fn spawn_ssh_proxy_task(
     app_state: Arc<AppState>,
     command: SshCommand,
-    stdin_payload: Vec<u8>,
-) -> Result<(Vec<u8>, Vec<u8>, u32), Status> {
+    channel: ChannelId,
+    session_handle: SshHandle,
+    stdin_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+) {
+    tokio::spawn(async move {
+        let result = match command.kind {
+            SshCommandKind::UploadPack => {
+                stream_upload_pack(
+                    app_state,
+                    command.repo_relative_path,
+                    session_handle.clone(),
+                    channel,
+                    stdin_rx,
+                )
+                .await
+            }
+            SshCommandKind::ReceivePack => {
+                stream_receive_pack(
+                    app_state,
+                    command.repo_relative_path,
+                    session_handle.clone(),
+                    channel,
+                    stdin_rx,
+                )
+                .await
+            }
+        };
+
+        if let Err(status) = result {
+            let _ = session_handle
+                .extended_data(
+                    channel,
+                    1,
+                    CryptoVec::from_slice(
+                        format!("gateway proxy error: {}\n", status.message()).as_bytes(),
+                    ),
+                )
+                .await;
+            let _ = session_handle.exit_status_request(channel, 1).await;
+            let _ = session_handle.eof(channel).await;
+            let _ = session_handle.close(channel).await;
+        }
+    });
+}
+
+async fn stream_upload_pack(
+    app_state: Arc<AppState>,
+    repo_relative_path: String,
+    session_handle: SshHandle,
+    channel: ChannelId,
+    mut stdin_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+) -> Result<(), Status> {
     let repository = Repository {
         storage_name: app_state.config.repositories.storage_name.clone(),
-        relative_path: command.repo_relative_path.clone(),
+        relative_path: repo_relative_path,
         ..Repository::default()
     };
 
+    let (request_tx, request_rx) = mpsc::channel::<SshUploadPackRequest>(16);
+    request_tx
+        .send(SshUploadPackRequest {
+            repository: Some(repository),
+            ..SshUploadPackRequest::default()
+        })
+        .await
+        .map_err(|_| Status::internal("failed to initialize upload-pack stream"))?;
+
     let mut client = SshServiceClient::new(app_state.channel.clone());
-    match command.kind {
-        SshCommandKind::UploadPack => {
-            let request_stream = tokio_stream::iter(vec![SshUploadPackRequest {
-                repository: Some(repository),
-                stdin: stdin_payload,
-                ..SshUploadPackRequest::default()
-            }]);
-            let mut grpc_request = GrpcRequest::new(request_stream);
-            attach_gitaly_auth(&mut grpc_request, &app_state.config.auth.gitaly_token)
-                .map_err(|(_, msg)| Status::internal(msg))?;
+    let mut grpc_request =
+        GrpcRequest::new(tokio_stream::wrappers::ReceiverStream::new(request_rx));
+    attach_gitaly_auth(&mut grpc_request, &app_state.config.auth.gitaly_token)
+        .map_err(|(_, msg)| Status::internal(msg))?;
+    let mut response_stream = client.ssh_upload_pack(grpc_request).await?.into_inner();
 
-            let mut stream = client.ssh_upload_pack(grpc_request).await?.into_inner();
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            let mut exit_status = 0_u32;
-            while let Some(message) = stream.message().await? {
-                stdout.extend_from_slice(&message.stdout);
-                stderr.extend_from_slice(&message.stderr);
-                if let Some(status) = message.exit_status {
-                    exit_status = status.value.max(0) as u32;
-                }
+    let stdin_forward = tokio::spawn(async move {
+        let request_tx = request_tx;
+        while let Some(chunk) = stdin_rx.recv().await {
+            if request_tx
+                .send(SshUploadPackRequest {
+                    stdin: chunk,
+                    ..SshUploadPackRequest::default()
+                })
+                .await
+                .is_err()
+            {
+                break;
             }
-            Ok((stdout, stderr, exit_status))
         }
-        SshCommandKind::ReceivePack => {
-            let request_stream = tokio_stream::iter(vec![SshReceivePackRequest {
-                repository: Some(repository),
-                stdin: stdin_payload,
-                gl_id: "gateway".to_string(),
-                gl_repository: command.repo_relative_path,
-                gl_username: "gateway".to_string(),
-                ..SshReceivePackRequest::default()
-            }]);
-            let mut grpc_request = GrpcRequest::new(request_stream);
-            attach_gitaly_auth(&mut grpc_request, &app_state.config.auth.gitaly_token)
-                .map_err(|(_, msg)| Status::internal(msg))?;
+    });
 
-            let mut stream = client.ssh_receive_pack(grpc_request).await?.into_inner();
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            let mut exit_status = 0_u32;
-            while let Some(message) = stream.message().await? {
-                stdout.extend_from_slice(&message.stdout);
-                stderr.extend_from_slice(&message.stderr);
-                if let Some(status) = message.exit_status {
-                    exit_status = status.value.max(0) as u32;
-                }
-            }
-            Ok((stdout, stderr, exit_status))
+    let mut exit_status = 0_u32;
+    while let Some(message) = response_stream.message().await? {
+        if !message.stdout.is_empty() {
+            session_handle
+                .data(channel, CryptoVec::from_slice(&message.stdout))
+                .await
+                .map_err(|_| Status::internal("failed to forward upload-pack stdout"))?;
+        }
+        if !message.stderr.is_empty() {
+            session_handle
+                .extended_data(channel, 1, CryptoVec::from_slice(&message.stderr))
+                .await
+                .map_err(|_| Status::internal("failed to forward upload-pack stderr"))?;
+        }
+        if let Some(status) = message.exit_status {
+            exit_status = status.value.max(0) as u32;
         }
     }
+
+    let _ = stdin_forward.await;
+    session_handle
+        .exit_status_request(channel, exit_status)
+        .await
+        .map_err(|_| Status::internal("failed to send upload-pack exit status"))?;
+    session_handle
+        .eof(channel)
+        .await
+        .map_err(|_| Status::internal("failed to send upload-pack EOF"))?;
+    session_handle
+        .close(channel)
+        .await
+        .map_err(|_| Status::internal("failed to close upload-pack channel"))?;
+    Ok(())
+}
+
+async fn stream_receive_pack(
+    app_state: Arc<AppState>,
+    repo_relative_path: String,
+    session_handle: SshHandle,
+    channel: ChannelId,
+    mut stdin_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+) -> Result<(), Status> {
+    let repository = Repository {
+        storage_name: app_state.config.repositories.storage_name.clone(),
+        relative_path: repo_relative_path.clone(),
+        ..Repository::default()
+    };
+
+    let (request_tx, request_rx) = mpsc::channel::<SshReceivePackRequest>(16);
+    request_tx
+        .send(SshReceivePackRequest {
+            repository: Some(repository),
+            gl_id: "gateway".to_string(),
+            gl_repository: repo_relative_path,
+            gl_username: "gateway".to_string(),
+            ..SshReceivePackRequest::default()
+        })
+        .await
+        .map_err(|_| Status::internal("failed to initialize receive-pack stream"))?;
+
+    let mut client = SshServiceClient::new(app_state.channel.clone());
+    let mut grpc_request =
+        GrpcRequest::new(tokio_stream::wrappers::ReceiverStream::new(request_rx));
+    attach_gitaly_auth(&mut grpc_request, &app_state.config.auth.gitaly_token)
+        .map_err(|(_, msg)| Status::internal(msg))?;
+    let mut response_stream = client.ssh_receive_pack(grpc_request).await?.into_inner();
+
+    let stdin_forward = tokio::spawn(async move {
+        let request_tx = request_tx;
+        while let Some(chunk) = stdin_rx.recv().await {
+            if request_tx
+                .send(SshReceivePackRequest {
+                    stdin: chunk,
+                    ..SshReceivePackRequest::default()
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    let mut exit_status = 0_u32;
+    while let Some(message) = response_stream.message().await? {
+        if !message.stdout.is_empty() {
+            session_handle
+                .data(channel, CryptoVec::from_slice(&message.stdout))
+                .await
+                .map_err(|_| Status::internal("failed to forward receive-pack stdout"))?;
+        }
+        if !message.stderr.is_empty() {
+            session_handle
+                .extended_data(channel, 1, CryptoVec::from_slice(&message.stderr))
+                .await
+                .map_err(|_| Status::internal("failed to forward receive-pack stderr"))?;
+        }
+        if let Some(status) = message.exit_status {
+            exit_status = status.value.max(0) as u32;
+        }
+    }
+
+    let _ = stdin_forward.await;
+    session_handle
+        .exit_status_request(channel, exit_status)
+        .await
+        .map_err(|_| Status::internal("failed to send receive-pack exit status"))?;
+    session_handle
+        .eof(channel)
+        .await
+        .map_err(|_| Status::internal("failed to send receive-pack EOF"))?;
+    session_handle
+        .close(channel)
+        .await
+        .map_err(|_| Status::internal("failed to close receive-pack channel"))?;
+    Ok(())
 }
 
 async fn run_ssh_server(state: Arc<AppState>, listen_addr: SocketAddr) -> Result<()> {
@@ -705,6 +836,28 @@ fn query_param<'a>(query: Option<&'a str>, name: &str) -> Option<&'a str> {
         }
     }
     None
+}
+
+fn normalize_public_key_entry(value: &str) -> Option<String> {
+    let mut parts = value.split_whitespace();
+    let key_type = parts.next()?;
+    let key_data = parts.next()?;
+    Some(format!("{key_type} {key_data}"))
+}
+
+fn decorate_info_refs_advertisement(service: &str, body: Vec<u8>) -> Vec<u8> {
+    let header = format!("# service={service}\n");
+    let mut decorated = Vec::with_capacity(4 + header.len() + 4 + body.len());
+    append_pkt_line(&mut decorated, header.as_bytes());
+    decorated.extend_from_slice(b"0000");
+    decorated.extend_from_slice(&body);
+    decorated
+}
+
+fn append_pkt_line(out: &mut Vec<u8>, payload: &[u8]) {
+    let line_len = payload.len() + 4;
+    out.extend_from_slice(format!("{line_len:04x}").as_bytes());
+    out.extend_from_slice(payload);
 }
 
 fn attach_gitaly_auth<T>(
@@ -796,4 +949,38 @@ fn error_response(code: StatusCode, message: String) -> Response {
     }
 
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decorate_info_refs_advertisement, normalize_public_key_entry};
+
+    #[test]
+    fn decorate_receive_pack_info_refs_adds_service_preamble() {
+        let decorated = decorate_info_refs_advertisement("git-receive-pack", b"payload".to_vec());
+        let mut expected = b"001f# service=git-receive-pack\n0000".to_vec();
+        expected.extend_from_slice(b"payload");
+        assert_eq!(decorated, expected);
+    }
+
+    #[test]
+    fn decorate_upload_pack_info_refs_adds_service_preamble() {
+        let decorated = decorate_info_refs_advertisement("git-upload-pack", b"abc".to_vec());
+        let mut expected = b"001e# service=git-upload-pack\n0000".to_vec();
+        expected.extend_from_slice(b"abc");
+        assert_eq!(decorated, expected);
+    }
+
+    #[test]
+    fn normalize_public_key_entry_strips_comment() {
+        let normalized = normalize_public_key_entry(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKsIFygFaTbKGqrHMFHM/7QqorpNsBeULda7aIbQgYVP user@example",
+        );
+        assert_eq!(
+            normalized.as_deref(),
+            Some(
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKsIFygFaTbKGqrHMFHM/7QqorpNsBeULda7aIbQgYVP"
+            )
+        );
+    }
 }

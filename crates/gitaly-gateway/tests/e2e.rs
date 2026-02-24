@@ -221,7 +221,7 @@ fn init_repo_fixture(storage_root: &Path, source_repo: &Path) {
     run_git(&["commit", "-m", "initial"], Some(source_repo), &[]);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_proxy_push_and_ls_remote() {
     let token = "user-token-1";
     let runtime_dir = unique_dir("http-e2e");
@@ -265,7 +265,7 @@ async fn http_proxy_push_and_ls_remote() {
     runtime_guard.cleanup().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ssh_proxy_push_and_ls_remote() {
     if !command_exists("ssh") || !command_exists("ssh-keygen") {
         eprintln!("skipping ssh e2e test because ssh or ssh-keygen is unavailable");

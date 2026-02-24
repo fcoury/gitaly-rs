@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::env;
+use std::error::Error as StdError;
 use std::fs;
 use std::net::SocketAddr;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -60,7 +62,7 @@ struct AppState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CliArgs {
-    config_path: String,
+    config_path: PathBuf,
 }
 
 impl CliArgs {
@@ -70,13 +72,14 @@ impl CliArgs {
     {
         let mut iter = args.into_iter();
         let _ = iter.next();
-        let mut config_path = env::var(ENV_CONFIG_PATH).ok();
+        let mut config_path = env::var_os(ENV_CONFIG_PATH).map(PathBuf::from);
 
         while let Some(arg) = iter.next() {
             match arg.as_str() {
                 "--config" => {
                     config_path = Some(
                         iter.next()
+                            .map(PathBuf::from)
                             .ok_or_else(|| anyhow!("missing value for `--config`"))?,
                     );
                 }
@@ -103,26 +106,32 @@ where
     tracing_subscriber::fmt::init();
 
     let args = CliArgs::parse(args)?;
-    let config = load_config(&args.config_path)?;
+    let config_path = absolute_path(&args.config_path);
+    let config = load_config(&config_path)?;
     let http_addr = config
         .http_listen_addr
         .parse::<SocketAddr>()
-        .context("invalid http_listen_addr")?;
+        .map_err(|error| {
+            anyhow!(
+                "invalid `http_listen_addr` value `{}` in `{}`: {error}",
+                config.http_listen_addr,
+                config_path.display()
+            )
+        })?;
     let ssh_addr = config
         .ssh_listen_addr
         .as_ref()
         .map(|value| {
-            value
-                .parse::<SocketAddr>()
-                .context("invalid ssh_listen_addr")
+            value.parse::<SocketAddr>().map_err(|error| {
+                anyhow!(
+                    "invalid `ssh_listen_addr` value `{value}` in `{}`: {error}",
+                    config_path.display()
+                )
+            })
         })
         .transpose()?;
 
-    let channel = GrpcChannel::from_shared(config.gitaly_addr.clone())
-        .context("invalid gitaly_addr")?
-        .connect()
-        .await
-        .context("failed connecting to gitaly-rs")?;
+    let channel = connect_gitaly(&config.gitaly_addr, &config_path).await?;
 
     let state = Arc::new(AppState {
         config: Arc::new(config),
@@ -135,7 +144,9 @@ where
 
     let http_listener = tokio::net::TcpListener::bind(http_addr)
         .await
-        .context("failed binding HTTP listener")?;
+        .map_err(|error| {
+            format_bind_error("HTTP", "http_listen_addr", http_addr, &config_path, &error)
+        })?;
     info!("gitaly-gateway HTTP listening on {http_addr}");
     let http_task = tokio::spawn(async move {
         axum::serve(http_listener, app)
@@ -145,8 +156,9 @@ where
 
     let ssh_task = if let Some(ssh_addr) = ssh_addr {
         let state = Arc::clone(&state);
+        let config_path = config_path.clone();
         Some(tokio::spawn(async move {
-            run_ssh_server(state, ssh_addr).await
+            run_ssh_server(state, ssh_addr, &config_path).await
         }))
     } else {
         warn!("SSH listener disabled because `ssh_listen_addr` is not configured");
@@ -181,10 +193,99 @@ pub async fn run_from_env() -> Result<()> {
     run_from_args(env::args()).await
 }
 
-fn load_config(path: &str) -> Result<GatewayConfig> {
-    let raw = fs::read_to_string(path).with_context(|| format!("failed to read `{path}`"))?;
+fn absolute_path(path: &FsPath) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+
+    env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn format_parse_error(config_path: &FsPath, parse_error: &str) -> anyhow::Error {
+    let mut message = format!(
+        "failed to parse config `{}`: {parse_error}",
+        config_path.display()
+    );
+    if let Some(hint) = parse_error_hint(parse_error) {
+        message.push_str("\nhint: ");
+        message.push_str(hint);
+    }
+    anyhow!(message)
+}
+
+fn parse_error_hint(parse_error: &str) -> Option<&'static str> {
+    if parse_error.contains("duplicate key") {
+        return Some(
+            "remove duplicate TOML table headers or keys (for example duplicate `[auth]`).",
+        );
+    }
+
+    if parse_error.contains("invalid type: string") && parse_error.contains("expected a sequence") {
+        return Some(
+            "array fields must use TOML arrays, for example `client_tokens = [\"token\"]`.",
+        );
+    }
+
+    None
+}
+
+fn format_bind_error(
+    listener_name: &str,
+    config_key: &str,
+    listen_addr: SocketAddr,
+    config_path: &FsPath,
+    error: &impl std::fmt::Display,
+) -> anyhow::Error {
+    let error_text = error.to_string();
+    let mut message = format!(
+        "{listener_name} listener failed to bind `{listen_addr}` from `{config_key}` in `{}`: {error_text}",
+        config_path.display()
+    );
+    if error_text
+        .to_ascii_lowercase()
+        .contains("address already in use")
+    {
+        message.push_str(
+            "\nhint: another process is already bound to this address; stop it or pick a different port.",
+        );
+    }
+    anyhow!(message)
+}
+
+fn connection_hint(gitaly_addr: &str, connection_error: &str) -> Option<String> {
+    let error_text = connection_error.to_ascii_lowercase();
+    if error_text.contains("connection refused") {
+        let reachable_addr = gitaly_addr
+            .trim_start_matches("http://")
+            .trim_start_matches("https://");
+        return Some(format!(
+            "start the gitaly server and ensure it listens on `{reachable_addr}` (example: `gitaly server --config /path/to/gitaly-rs.toml`)."
+        ));
+    }
+
+    if error_text.contains("timed out") || error_text.contains("deadline has elapsed") {
+        return Some(
+            "verify network reachability and ensure `gitaly_addr` points to the active gitaly server."
+                .to_string(),
+        );
+    }
+
+    if error_text.contains("dns error") {
+        return Some(
+            "verify the host name in `gitaly_addr` is resolvable from this machine.".to_string(),
+        );
+    }
+
+    None
+}
+
+fn load_config(path: &FsPath) -> Result<GatewayConfig> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read config `{}`", path.display()))?;
     let config: GatewayConfig =
-        toml::from_str(&raw).with_context(|| format!("failed to parse `{path}`"))?;
+        toml::from_str(&raw).map_err(|error| format_parse_error(path, &error.to_string()))?;
 
     if config.auth.client_tokens.is_empty() {
         return Err(anyhow!("auth.client_tokens must not be empty"));
@@ -197,6 +298,36 @@ fn load_config(path: &str) -> Result<GatewayConfig> {
     }
 
     Ok(config)
+}
+
+async fn connect_gitaly(gitaly_addr: &str, config_path: &FsPath) -> Result<GrpcChannel> {
+    let endpoint = GrpcChannel::from_shared(gitaly_addr.to_string()).with_context(|| {
+        format!(
+            "invalid `gitaly_addr` value `{gitaly_addr}` in `{}`",
+            config_path.display()
+        )
+    })?;
+
+    endpoint.connect().await.map_err(|error| {
+        let error_text = format_error_chain(&error);
+        let mut message = format!("failed to connect to gitaly at `{gitaly_addr}`: {error_text}");
+        if let Some(hint) = connection_hint(gitaly_addr, &error_text) {
+            message.push_str("\nhint: ");
+            message.push_str(&hint);
+        }
+        anyhow!(message)
+    })
+}
+
+fn format_error_chain(error: &(impl StdError + 'static)) -> String {
+    let mut full_message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        full_message.push_str(": ");
+        full_message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    full_message
 }
 
 async fn handle_get(
@@ -770,7 +901,11 @@ async fn stream_receive_pack(
     Ok(())
 }
 
-async fn run_ssh_server(state: Arc<AppState>, listen_addr: SocketAddr) -> Result<()> {
+async fn run_ssh_server(
+    state: Arc<AppState>,
+    listen_addr: SocketAddr,
+    config_path: &FsPath,
+) -> Result<()> {
     let host_key = russh::keys::PrivateKey::random(
         &mut russh::keys::ssh_key::rand_core::OsRng,
         russh::keys::ssh_key::Algorithm::Ed25519,
@@ -790,7 +925,9 @@ async fn run_ssh_server(state: Arc<AppState>, listen_addr: SocketAddr) -> Result
     server
         .run_on_address(Arc::new(ssh_config), listen_addr)
         .await
-        .context("ssh server exited with error")
+        .map_err(|error| {
+            format_bind_error("SSH", "ssh_listen_addr", listen_addr, config_path, &error)
+        })
 }
 
 fn authenticate(
@@ -959,7 +1096,10 @@ fn error_response(code: StatusCode, message: String) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{decorate_info_refs_advertisement, normalize_public_key_entry};
+    use super::{
+        connection_hint, decorate_info_refs_advertisement, normalize_public_key_entry,
+        parse_error_hint,
+    };
 
     #[test]
     fn decorate_receive_pack_info_refs_adds_service_preamble() {
@@ -986,6 +1126,29 @@ mod tests {
             normalized.as_deref(),
             Some(
                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKsIFygFaTbKGqrHMFHM/7QqorpNsBeULda7aIbQgYVP"
+            )
+        );
+    }
+
+    #[test]
+    fn parse_error_hint_reports_duplicate_key_guidance() {
+        let hint = parse_error_hint("invalid table header\nduplicate key `auth` in document root");
+        assert_eq!(
+            hint,
+            Some("remove duplicate TOML table headers or keys (for example duplicate `[auth]`).")
+        );
+    }
+
+    #[test]
+    fn connection_hint_reports_connection_refused_guidance() {
+        let hint = connection_hint(
+            "http://127.0.0.1:2305",
+            "transport error: tcp connect error: Connection refused (os error 61)",
+        );
+        assert_eq!(
+            hint.as_deref(),
+            Some(
+                "start the gitaly server and ensure it listens on `127.0.0.1:2305` (example: `gitaly server --config /path/to/gitaly-rs.toml`).",
             )
         );
     }

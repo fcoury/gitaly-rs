@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -20,13 +20,14 @@ where
     I: IntoIterator<Item = String>,
 {
     let args = CliArgs::parse(args)?;
-    let config = load_config(&args.config_path)?;
+    let config_path = absolute_path(&args.config_path);
+    let config = load_config(&config_path)?;
     let runtime_dir = args.runtime_dir.unwrap_or_else(default_runtime_dir);
     let runtime_paths =
         RuntimePaths::bootstrap(runtime_dir).context("failed to bootstrap runtime paths")?;
 
-    let listen_addr = parse_socket_addr("listen_addr", &config.listen_addr)?;
-    let internal_addr = parse_socket_addr("internal_addr", &config.internal_addr)?;
+    let listen_addr = parse_socket_addr("listen_addr", &config.listen_addr, &config_path)?;
+    let internal_addr = parse_socket_addr("internal_addr", &config.internal_addr, &config_path)?;
     let dependencies = Arc::new(build_dependencies(&config));
 
     eprintln!("gitaly-rs external listener: {listen_addr}");
@@ -53,7 +54,7 @@ where
         external_router
             .serve_with_shutdown(listen_addr, shutdown_future(external_shutdown_rx))
             .await
-            .context("external gRPC server exited with error")
+            .map_err(|error| format_listener_error("external gRPC", listen_addr, error))
     });
 
     let internal_task = if internal_addr != listen_addr {
@@ -68,7 +69,7 @@ where
             internal_router
                 .serve_with_shutdown(internal_addr, shutdown_future(internal_shutdown_rx))
                 .await
-                .context("internal gRPC server exited with error")
+                .map_err(|error| format_listener_error("internal gRPC", internal_addr, error))
         }))
     } else {
         None
@@ -98,13 +99,20 @@ pub async fn run_from_env() -> Result<()> {
 fn load_config(path: &PathBuf) -> Result<Config> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("failed to read config file `{}`", path.display()))?;
-    Config::from_toml(&raw).with_context(|| format!("failed to parse config `{}`", path.display()))
+    Config::from_toml(&raw).map_err(|error| format_parse_error(path, &error.to_string()))
 }
 
-fn parse_socket_addr(field_name: &str, listen_addr: &str) -> Result<SocketAddr> {
-    listen_addr
-        .parse::<SocketAddr>()
-        .with_context(|| format!("invalid `{field_name}`: `{listen_addr}`"))
+fn parse_socket_addr(
+    field_name: &str,
+    listen_addr: &str,
+    config_path: &Path,
+) -> Result<SocketAddr> {
+    listen_addr.parse::<SocketAddr>().map_err(|error| {
+        anyhow!(
+            "invalid `{field_name}` value `{listen_addr}` in `{}`: {error}",
+            config_path.display()
+        )
+    })
 }
 
 async fn shutdown_future(mut shutdown_rx: watch::Receiver<bool>) {
@@ -168,6 +176,62 @@ fn map_bootstrap_error(error: ServerBootstrapError) -> anyhow::Error {
     anyhow!("failed to build server router: {error}")
 }
 
+fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+
+    env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn format_parse_error(config_path: &Path, parse_error: &str) -> anyhow::Error {
+    let mut message = format!(
+        "failed to parse config `{}`: {parse_error}",
+        config_path.display()
+    );
+    if let Some(hint) = parse_error_hint(parse_error) {
+        message.push_str("\nhint: ");
+        message.push_str(hint);
+    }
+    anyhow!(message)
+}
+
+fn parse_error_hint(parse_error: &str) -> Option<&'static str> {
+    if parse_error.contains("duplicate key") {
+        return Some(
+            "remove duplicate TOML table headers or keys (for example duplicate `[auth]`).",
+        );
+    }
+
+    if parse_error.contains("invalid type: string") && parse_error.contains("expected a sequence") {
+        return Some(
+            "array fields must use TOML arrays, for example `client_tokens = [\"token\"]`.",
+        );
+    }
+
+    None
+}
+
+fn format_listener_error(
+    listener_name: &str,
+    listen_addr: SocketAddr,
+    error: impl std::fmt::Display,
+) -> anyhow::Error {
+    let error_text = error.to_string();
+    let mut message = format!("{listener_name} listener failed on `{listen_addr}`: {error_text}");
+    if error_text
+        .to_ascii_lowercase()
+        .contains("address already in use")
+    {
+        message.push_str(
+            "\nhint: another process is already bound to this address; stop it or change the listen address.",
+        );
+    }
+    anyhow!(message)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CliArgs {
     config_path: PathBuf,
@@ -227,7 +291,7 @@ fn print_usage() {
 
 #[cfg(test)]
 mod tests {
-    use super::CliArgs;
+    use super::{parse_error_hint, CliArgs};
 
     #[test]
     fn parses_required_config_argument() {
@@ -259,6 +323,24 @@ mod tests {
         assert_eq!(
             args.runtime_dir,
             Some(std::path::PathBuf::from("/tmp/gitaly-runtime"))
+        );
+    }
+
+    #[test]
+    fn parse_error_hint_reports_duplicate_key_guidance() {
+        let hint = parse_error_hint("invalid table header\nduplicate key `auth` in document root");
+        assert_eq!(
+            hint,
+            Some("remove duplicate TOML table headers or keys (for example duplicate `[auth]`).")
+        );
+    }
+
+    #[test]
+    fn parse_error_hint_reports_array_type_guidance() {
+        let hint = parse_error_hint("invalid type: string \"[token]\", expected a sequence");
+        assert_eq!(
+            hint,
+            Some("array fields must use TOML arrays, for example `client_tokens = [\"token\"]`.")
         );
     }
 }

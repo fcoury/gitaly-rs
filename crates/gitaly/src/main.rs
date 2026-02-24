@@ -1,4 +1,7 @@
-use anyhow::{anyhow, Result};
+use std::env;
+use std::process::ExitCode;
+
+use anyhow::{anyhow, Error, Result};
 
 #[derive(Debug, PartialEq, Eq)]
 enum Dispatch {
@@ -8,8 +11,14 @@ enum Dispatch {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    dispatch_from_args(std::env::args()).await
+async fn main() -> ExitCode {
+    match dispatch_from_args(env::args()).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            render_error(&error);
+            ExitCode::FAILURE
+        }
+    }
 }
 
 async fn dispatch_from_args<I>(args: I) -> Result<()>
@@ -60,9 +69,78 @@ fn print_usage() {
     );
 }
 
+fn render_error(error: &Error) {
+    eprintln!("Error: {error}");
+
+    let mut chain = error.chain();
+    let _ = chain.next();
+    if let Some(cause) = chain.next() {
+        eprintln!("Cause: {cause}");
+    }
+
+    if debug_enabled() {
+        for cause in chain {
+            eprintln!("Cause: {cause}");
+        }
+    }
+
+    if let Some(hint) = error_hint(error) {
+        eprintln!("Hint: {hint}");
+    }
+}
+
+fn debug_enabled() -> bool {
+    matches!(
+        env::var("GITALY_DEBUG")
+            .ok()
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+fn error_hint(error: &Error) -> Option<&'static str> {
+    let error_text = error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" | ")
+        .to_ascii_lowercase();
+
+    if error_text.contains("hint:") {
+        return None;
+    }
+
+    if error_text.contains("duplicate key") {
+        return Some(
+            "remove duplicate TOML tables or keys from your config (for example duplicate `[auth]`).",
+        );
+    }
+
+    if error_text.contains("invalid type: string") && error_text.contains("expected a sequence") {
+        return Some(
+            "array fields must use TOML arrays, for example `client_tokens = [\"token\"]`.",
+        );
+    }
+
+    if error_text.contains("connection refused") {
+        return Some(
+            "start the server first and ensure `gitaly_addr` points to the active `listen_addr`.",
+        );
+    }
+
+    if error_text.contains("address already in use") {
+        return Some("another process is already bound to this address; free the port or change the listen address.");
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_dispatch, Dispatch};
+    use super::{error_hint, parse_dispatch, Dispatch};
+    use anyhow::anyhow;
 
     #[test]
     fn parse_help_when_missing_subcommand() {
@@ -118,5 +196,25 @@ mod tests {
         assert!(error
             .to_string()
             .contains("unknown subcommand `unknown`; expected `server` or `gateway`"));
+    }
+
+    #[test]
+    fn duplicate_key_errors_provide_config_hint() {
+        let error = anyhow!("duplicate key `auth` in document root");
+        assert_eq!(
+            error_hint(&error),
+            Some(
+                "remove duplicate TOML tables or keys from your config (for example duplicate `[auth]`).",
+            )
+        );
+    }
+
+    #[test]
+    fn connection_refused_errors_provide_startup_hint() {
+        let error = anyhow!("tcp connect error: Connection refused");
+        assert_eq!(
+            error_hint(&error),
+            Some("start the server first and ensure `gitaly_addr` points to the active `listen_addr`.")
+        );
     }
 }

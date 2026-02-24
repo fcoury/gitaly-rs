@@ -152,3 +152,20 @@ grpcurl -plaintext -import-path ./proto -proto server.proto -d '{}' 127.0.0.1:23
 - `warning: ... Skipping cluster.proto ... missing proto/raftpb/raft.proto`
   - Known workspace warning from proto generation; unrelated to basic
     `ServerService` runtime behavior.
+
+### Gateway-specific startup failures
+
+- `failed to parse config ... duplicate key ...`
+  - Remove duplicate TOML tables, such as multiple `[auth]` sections.
+- `failed to parse config ... invalid type: string ..., expected a sequence`
+  - Use TOML arrays for list values.
+  - Example: `client_tokens = ["user-token-1"]`, not
+    `client_tokens = "[user-token-1]"`.
+- `failed to connect to gitaly at ... connection refused`
+  - Start the server and ensure `gitaly_addr` matches the server
+    `listen_addr`.
+  - Example:
+    `gitaly server --config /Volumes/External/gitaly-workspace/config/gitaly-rs.toml`.
+- `listener failed to bind ... Address already in use`
+  - Another process owns the port; stop it or change `http_listen_addr` /
+    `ssh_listen_addr`.

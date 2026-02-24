@@ -37,7 +37,8 @@ Last updated: 2026-02-24
 | T02e | Implement SSH sidechannel read RPC baseline | `service/ssh.rs` | done | Implemented unary sidechannel baseline with negotiation stats parsing and validation |
 | T03 | Implement real write semantics in hook and operation flows | `service/{hook,operations,smarthttp,ssh}.rs` + `gitaly-git` | in_progress | Split into focused slices for deterministic commits |
 | T03a | Implement SmartHTTP upload-pack sidechannel write-path baseline | `service/smarthttp.rs` | done | Added sidechannel upload-pack execution with request validation and negotiation stats |
-| T03b | Harden OperationService mutation RPC semantics | `service/operations.rs` | in_progress | Add repository resolution and mutation-oriented validation paths |
+| T03b | Harden OperationService mutation RPC semantics | `service/operations.rs` | done | Added repository contract checks for unary/streaming mutation RPCs with focused tests |
+| T03c | Wire git protocol/config options for streaming pack RPCs | `service/{ssh,smarthttp}.rs` | in_progress | Apply `git_protocol` and `git_config_options` in streaming upload/receive flows |
 | T04 | Finish remote and repository remaining RPC surface | `service/{remote,repository}.rs` | pending | Remaining `unimplemented` methods |
 | T05 | Add missing binaries and packaging path | `bins/*`, workspace wiring | pending | `gitaly-hooks`, `gitaly-ssh`, then backup/gpg/lfs/blackbox |
 | T06 | Build root integration/chaos/stress test layout | `tests/*`, `benches/*` | pending | Create planned hierarchy and first end-to-end suites |
@@ -45,15 +46,15 @@ Last updated: 2026-02-24
 
 ## Current Task Detail
 
-### T03b - Harden OperationService mutation RPC semantics
+### T03c - Wire git protocol/config options for streaming pack RPCs
 
 Subtasks:
-- Add repository resolution for unary and streaming mutation requests.
-- Return explicit `InvalidArgument`/`NotFound` errors for malformed or missing repositories.
-- Add focused tests validating mutation request contracts.
+- Capture first-message `git_config_options` and `git_protocol` in streaming RPCs.
+- Pass validated options to spawned git commands for SSH and SmartHTTP streams.
+- Add focused tests for option validation and command wiring.
 
 Verification target:
-- `cargo test -p gitaly-server --lib service::operations:: -- --test-threads=1`
+- `cargo test -p gitaly-server --lib service::{ssh,smarthttp}:: -- --test-threads=1`
 
 ## Changelog
 
@@ -67,3 +68,4 @@ Verification target:
 - 2026-02-24: Completed T02e by implementing SSH sidechannel upload-pack baseline and focused tests.
 - 2026-02-24: Marked T02 complete and started T03 write-semantics phase.
 - 2026-02-24: Completed T03a by implementing SmartHTTP sidechannel upload-pack baseline and focused tests.
+- 2026-02-24: Completed T03b by adding OperationService mutation repository validation and contract tests.

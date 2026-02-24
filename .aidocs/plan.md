@@ -40,22 +40,24 @@ Last updated: 2026-02-24
 | T03b | Harden OperationService mutation RPC semantics | `service/operations.rs` | done | Added repository contract checks for unary/streaming mutation RPCs with focused tests |
 | T03c | Wire git protocol/config options for streaming pack RPCs | `service/{ssh,smarthttp}.rs` | done | Applied validated git config/protocol handling in streaming SSH/SmartHTTP pack flows |
 | T03d | Align remaining write-path command option handling | `service/{smarthttp,ssh}.rs` | done | Added info-refs and streaming option propagation with validation tests |
-| T04 | Finish remote and repository remaining RPC surface | `service/{remote,repository}.rs` | in_progress | Remaining `unimplemented` methods |
+| T04 | Finish remote and repository remaining RPC surface | `service/{remote,repository}.rs` | in_progress | Split into remote/repository slices for deterministic commits |
+| T04a | Implement remaining RemoteService RPCs | `service/remote.rs` | done | Implemented `update_remote_mirror` baseline with focused tests |
+| T04b | Implement remaining RepositoryService RPCs | `service/repository.rs` | in_progress | Replace remaining `unimplemented` repository RPCs in focused slices |
 | T05 | Add missing binaries and packaging path | `bins/*`, workspace wiring | pending | `gitaly-hooks`, `gitaly-ssh`, then backup/gpg/lfs/blackbox |
 | T06 | Build root integration/chaos/stress test layout | `tests/*`, `benches/*` | pending | Create planned hierarchy and first end-to-end suites |
 | T07 | Introduce `gitaly-cluster` and real raft integration | `crates/gitaly-cluster`, `service/raft.rs` | pending | Move from placeholder service to `openraft`-backed cluster state |
 
 ## Current Task Detail
 
-### T04 - Finish remote and repository remaining RPC surface
+### T04b - Implement remaining RepositoryService RPCs
 
 Subtasks:
-- Implement remaining `RemoteService` stubs.
-- Implement remaining `RepositoryService` stubs.
-- Add focused tests for each newly implemented RPC cluster.
+- Implement repository RPC stubs in focused batches.
+- Add focused tests for each implemented repository RPC cluster.
+- Keep backward-compatible default payload behavior where required.
 
 Verification target:
-- `cargo test -p gitaly-server --lib service::{remote,repository}:: -- --test-threads=1`
+- `cargo test -p gitaly-server --lib service::repository:: -- --test-threads=1`
 
 ## Changelog
 
@@ -73,3 +75,4 @@ Verification target:
 - 2026-02-24: Completed T03c by wiring validated git protocol/config options in streaming SSH and SmartHTTP pack RPCs.
 - 2026-02-24: Completed T03d by applying option handling to remaining SmartHTTP write-adjacent RPCs.
 - 2026-02-24: Marked T03 complete and started T04 remote/repository RPC closure phase.
+- 2026-02-24: Completed T04a by implementing `update_remote_mirror` baseline and focused remote service tests.

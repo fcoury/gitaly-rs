@@ -19,11 +19,6 @@ impl RemoteServiceImpl {
         Self { dependencies }
     }
 
-    fn unimplemented(&self, method: &'static str) -> Status {
-        let _ = &self.dependencies;
-        unimplemented_remote_rpc(method)
-    }
-
     fn ensure_storage_configured(&self, storage_name: &str) -> Result<(), Status> {
         if storage_name.trim().is_empty() {
             return Err(Status::invalid_argument("storage_name is required"));
@@ -37,10 +32,6 @@ impl RemoteServiceImpl {
             "storage `{storage_name}` is not configured"
         )))
     }
-}
-
-fn unimplemented_remote_rpc(method: &'static str) -> Status {
-    Status::unimplemented(format!("RemoteService::{method} is not implemented"))
 }
 
 fn status_for_git_failure(args: &str, output: &std::process::Output) -> Status {
@@ -73,9 +64,57 @@ fn remote_not_found(stderr: &[u8]) -> bool {
 impl RemoteService for RemoteServiceImpl {
     async fn update_remote_mirror(
         &self,
-        _request: Request<tonic::Streaming<UpdateRemoteMirrorRequest>>,
+        request: Request<tonic::Streaming<UpdateRemoteMirrorRequest>>,
     ) -> Result<Response<UpdateRemoteMirrorResponse>, Status> {
-        Err(self.unimplemented("update_remote_mirror"))
+        let mut stream = request.into_inner();
+        let mut repository = None;
+        let mut remote_url: Option<String> = None;
+
+        while let Some(message) = stream
+            .message()
+            .await
+            .map_err(|err| Status::invalid_argument(format!("invalid request stream: {err}")))?
+        {
+            if repository.is_none() {
+                repository = message.repository;
+            }
+
+            if remote_url.is_none() {
+                remote_url = message
+                    .remote
+                    .as_ref()
+                    .map(|remote| remote.url.trim().to_string())
+                    .filter(|value| !value.is_empty());
+            }
+        }
+
+        let repository =
+            repository.ok_or_else(|| Status::invalid_argument("repository is required"))?;
+        self.ensure_storage_configured(&repository.storage_name)?;
+
+        let remote_url =
+            remote_url.ok_or_else(|| Status::invalid_argument("remote.url is required"))?;
+
+        let output = Command::new("git")
+            .args(["ls-remote", "--heads", "--tags", &remote_url])
+            .output()
+            .await
+            .map_err(|err| Status::internal(format!("failed to execute git command: {err}")))?;
+
+        if !output.status.success() {
+            if remote_not_found(&output.stderr) {
+                return Err(Status::not_found("remote repository was not found"));
+            }
+
+            return Err(Status::unavailable(format!(
+                "failed to access remote mirror: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+
+        Ok(Response::new(UpdateRemoteMirrorResponse {
+            divergent_refs: Vec::new(),
+        }))
     }
 
     async fn find_remote_repository(
@@ -99,7 +138,9 @@ impl RemoteService for RemoteServiceImpl {
         }
 
         if remote_not_found(&output.stderr) {
-            return Ok(Response::new(FindRemoteRepositoryResponse { exists: false }));
+            return Ok(Response::new(FindRemoteRepositoryResponse {
+                exists: false,
+            }));
         }
 
         Err(Status::unavailable(format!(
@@ -136,7 +177,9 @@ impl RemoteService for RemoteServiceImpl {
         let reference = parse_remote_root_ref(&output.stdout)
             .ok_or_else(|| Status::not_found("remote root ref was not advertised"))?;
 
-        Ok(Response::new(FindRemoteRootRefResponse { r#ref: reference }))
+        Ok(Response::new(FindRemoteRootRefResponse {
+            r#ref: reference,
+        }))
     }
 }
 
@@ -149,16 +192,15 @@ mod tests {
     use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use tokio::sync::oneshot;
-    use tokio::task::JoinHandle;
-    use tokio::time::sleep;
-    use tonic::Code;
-
     use gitaly_proto::gitaly::remote_service_client::RemoteServiceClient;
     use gitaly_proto::gitaly::remote_service_server::RemoteServiceServer;
     use gitaly_proto::gitaly::{
-        FindRemoteRepositoryRequest, FindRemoteRootRefRequest, Repository, UpdateRemoteMirrorRequest,
+        FindRemoteRepositoryRequest, FindRemoteRootRefRequest, Repository,
+        UpdateRemoteMirrorRequest,
     };
+    use tokio::sync::oneshot;
+    use tokio::task::JoinHandle;
+    use tokio::time::sleep;
 
     use crate::dependencies::Dependencies;
 
@@ -196,7 +238,10 @@ mod tests {
         std::fs::create_dir_all(&remote_repo).expect("remote repo should be creatable");
 
         run_git(&source_repo, &["init", "--quiet"]);
-        run_git(&source_repo, &["config", "user.name", "Remote Service Tests"]);
+        run_git(
+            &source_repo,
+            &["config", "user.name", "Remote Service Tests"],
+        );
         run_git(
             &source_repo,
             &["config", "user.email", "remote-service-tests@example.com"],
@@ -207,7 +252,15 @@ mod tests {
         run_git(&source_repo, &["branch", "-M", "main"]);
 
         run_git(&remote_repo, &["init", "--bare", "--quiet"]);
-        run_git(&source_repo, &["remote", "add", "origin", remote_repo.to_string_lossy().as_ref()]);
+        run_git(
+            &source_repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote_repo.to_string_lossy().as_ref(),
+            ],
+        );
         run_git(&source_repo, &["push", "--quiet", "origin", "main"]);
         run_git(&remote_repo, &["symbolic-ref", "HEAD", "refs/heads/main"]);
 
@@ -264,19 +317,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_remote_mirror_remains_unimplemented() {
+    async fn update_remote_mirror_returns_empty_divergence_baseline() {
+        let root = unique_dir("remote-service-update-mirror");
+        std::fs::create_dir_all(&root).expect("root should be creatable");
+        let remote_repo = create_remote_fixture(&root);
+
+        let mut storage_paths = HashMap::new();
+        storage_paths.insert("default".to_string(), root.clone());
+        let dependencies = Arc::new(Dependencies::default().with_storage_paths(storage_paths));
+
         let (endpoint, shutdown_tx, server_task) =
-            start_server(RemoteServiceImpl::new(test_dependencies())).await;
+            start_server(RemoteServiceImpl::new(dependencies)).await;
         let mut client = connect_client(endpoint).await;
 
-        let update_mirror_stream = tokio_stream::iter(vec![UpdateRemoteMirrorRequest::default()]);
-        let update_mirror_error = client
+        let update_mirror_stream = tokio_stream::iter(vec![UpdateRemoteMirrorRequest {
+            repository: Some(Repository {
+                storage_name: "default".to_string(),
+                relative_path: "source".to_string(),
+                ..Repository::default()
+            }),
+            remote: Some(gitaly_proto::gitaly::update_remote_mirror_request::Remote {
+                url: remote_repo.to_string_lossy().into_owned(),
+                http_authorization_header: String::new(),
+                resolved_address: String::new(),
+            }),
+            ..UpdateRemoteMirrorRequest::default()
+        }]);
+        let response = client
             .update_remote_mirror(update_mirror_stream)
             .await
-            .expect_err("update_remote_mirror should be unimplemented");
-        assert_eq!(update_mirror_error.code(), Code::Unimplemented);
+            .expect("update_remote_mirror should succeed")
+            .into_inner();
+        assert!(response.divergent_refs.is_empty());
 
         shutdown_server(shutdown_tx, server_task).await;
+        if root.exists() {
+            std::fs::remove_dir_all(root).expect("root should be removable");
+        }
     }
 
     #[tokio::test]

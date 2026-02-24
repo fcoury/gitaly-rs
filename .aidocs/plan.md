@@ -33,8 +33,8 @@ Last updated: 2026-02-24
 | T02a | Implement remaining DiffService read RPCs | `service/diff.rs` | done | Implemented `commit_diff`, `commit_delta`, and `diff_blobs` with focused tests |
 | T02b | Implement remaining RefService read RPCs | `service/ref_.rs` | done | Implemented remaining read stubs with focused service tests |
 | T02c | Implement remaining BlobService read RPCs | `service/blob.rs` | done | Implemented list-all and LFS pointer RPCs with focused service tests |
-| T02d | Implement remaining CommitService read RPCs | `service/commit.rs` | in_progress | remove `unimplemented` for remaining read methods |
-| T02e | Implement SSH sidechannel read RPC baseline | `service/ssh.rs` | pending | `ssh_upload_pack_with_sidechannel` |
+| T02d | Implement remaining CommitService read RPCs | `service/commit.rs` | done | Implemented remaining read RPCs with git-backed baselines and focused tests |
+| T02e | Implement SSH sidechannel read RPC baseline | `service/ssh.rs` | in_progress | `ssh_upload_pack_with_sidechannel` |
 | T03 | Implement real write semantics in hook and operation flows | `service/{hook,operations,smarthttp,ssh}.rs` + `gitaly-git` | pending | Hook ordering, transactional behavior, meaningful responses |
 | T04 | Finish remote and repository remaining RPC surface | `service/{remote,repository}.rs` | pending | Remaining `unimplemented` methods |
 | T05 | Add missing binaries and packaging path | `bins/*`, workspace wiring | pending | `gitaly-hooks`, `gitaly-ssh`, then backup/gpg/lfs/blackbox |
@@ -43,17 +43,15 @@ Last updated: 2026-02-24
 
 ## Current Task Detail
 
-### T02d - Implement remaining CommitService read RPCs
+### T02e - Implement SSH sidechannel read RPC baseline
 
 Subtasks:
-- Implement `count_diverging_commits`.
-- Implement `find_all_commits` and `find_commits`.
-- Implement signature/message related read RPCs.
-- Implement `check_objects_exist`.
-- Add/update tests for newly implemented methods.
+- Implement `ssh_upload_pack_with_sidechannel`.
+- Add baseline request validation and command wiring.
+- Add/update focused tests for sidechannel response flow.
 
 Verification target:
-- `cargo test -p gitaly-server --lib service::commit:: -- --test-threads=1`
+- `cargo test -p gitaly-server --lib service::ssh:: -- --test-threads=1`
 
 ## Changelog
 
@@ -63,3 +61,4 @@ Verification target:
 - 2026-02-24: Completed T02a by implementing remaining DiffService read RPC stubs.
 - 2026-02-24: Completed T02b by implementing remaining RefService read RPC stubs.
 - 2026-02-24: Completed T02c by implementing remaining BlobService read RPC stubs.
+- 2026-02-24: Completed T02d by implementing remaining CommitService read RPC stubs and focused tests.

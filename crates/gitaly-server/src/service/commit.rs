@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
 use tokio::process::Command;
-use tokio_stream::Stream;
+use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status};
 
 use gitaly_proto::gitaly::commit_service_server::CommitService;
@@ -77,10 +78,6 @@ fn validate_relative_path(relative_path: &str) -> Result<(), Status> {
     }
 
     Ok(())
-}
-
-fn unimplemented_commit_rpc(method: &str) -> Status {
-    Status::unimplemented(format!("CommitService::{method} is not implemented"))
 }
 
 fn decode_utf8(field: &'static str, bytes: Vec<u8>) -> Result<String, Status> {
@@ -358,6 +355,130 @@ fn parse_numstat_value(value: &str) -> Result<i64, Status> {
     value
         .parse::<i64>()
         .map_err(|err| Status::internal(format!("failed to parse numstat field: {err}")))
+}
+
+fn parse_null_delimited_paths(stdout: &[u8]) -> Vec<String> {
+    stdout
+        .split(|byte| *byte == 0)
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| String::from_utf8_lossy(segment).to_string())
+        .collect()
+}
+
+fn parse_commit_ids(stdout: &[u8]) -> Vec<GitCommit> {
+    parse_output_lines(stdout)
+        .into_iter()
+        .map(|id| GitCommit {
+            id,
+            ..GitCommit::default()
+        })
+        .collect()
+}
+
+fn parse_commit_author_line(line: &str) -> Option<CommitAuthor> {
+    let (author_and_email, date_and_timezone) = line.rsplit_once('>')?;
+    let (name, email) = author_and_email.rsplit_once('<')?;
+    let mut date_parts = date_and_timezone.split_whitespace();
+    let _seconds = date_parts.next()?.parse::<i64>().ok()?;
+    let timezone = date_parts.next().unwrap_or("+0000");
+
+    Some(CommitAuthor {
+        name: name.trim_end().as_bytes().to_vec(),
+        email: email.trim().as_bytes().to_vec(),
+        date: None,
+        timezone: timezone.as_bytes().to_vec(),
+    })
+}
+
+#[derive(Debug, Default)]
+struct ParsedCommitObject {
+    signature: Vec<u8>,
+    author: Option<CommitAuthor>,
+    committer: Option<CommitAuthor>,
+}
+
+fn parse_commit_object(raw: &[u8]) -> ParsedCommitObject {
+    let Some(header_end) = raw.windows(2).position(|window| window == b"\n\n") else {
+        return ParsedCommitObject::default();
+    };
+
+    let header_bytes = &raw[..header_end];
+    let header = String::from_utf8_lossy(header_bytes);
+
+    let mut parsed = ParsedCommitObject::default();
+    let mut current_key: Option<String> = None;
+    let mut current_value = String::new();
+
+    let mut flush_header = |key: Option<String>, value: &str| {
+        let Some(key) = key else {
+            return;
+        };
+
+        match key.as_str() {
+            "gpgsig" => parsed.signature = value.as_bytes().to_vec(),
+            "author" => parsed.author = parse_commit_author_line(value),
+            "committer" => parsed.committer = parse_commit_author_line(value),
+            _ => {}
+        }
+    };
+
+    for line in header.lines() {
+        if let Some(continued) = line.strip_prefix(' ') {
+            if !current_value.is_empty() {
+                current_value.push('\n');
+            }
+            current_value.push_str(continued);
+            continue;
+        }
+
+        flush_header(current_key.take(), &current_value);
+        current_value.clear();
+
+        let Some((key, value)) = line.split_once(' ') else {
+            continue;
+        };
+
+        current_key = Some(key.to_string());
+        current_value.push_str(value);
+    }
+
+    flush_header(current_key, &current_value);
+    parsed
+}
+
+fn detect_language(path: &str) -> Option<&'static str> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)?;
+
+    match extension.as_str() {
+        "c" | "h" => Some("C"),
+        "cc" | "cpp" | "cxx" | "hpp" | "hh" => Some("C++"),
+        "cs" => Some("C#"),
+        "css" => Some("CSS"),
+        "go" => Some("Go"),
+        "html" | "htm" => Some("HTML"),
+        "java" => Some("Java"),
+        "js" | "jsx" => Some("JavaScript"),
+        "json" => Some("JSON"),
+        "kt" | "kts" => Some("Kotlin"),
+        "m" | "mm" => Some("Objective-C"),
+        "php" => Some("PHP"),
+        "py" => Some("Python"),
+        "rb" => Some("Ruby"),
+        "rs" => Some("Rust"),
+        "scala" => Some("Scala"),
+        "sh" | "bash" => Some("Shell"),
+        "sql" => Some("SQL"),
+        "swift" => Some("Swift"),
+        "toml" => Some("TOML"),
+        "ts" | "tsx" => Some("TypeScript"),
+        "xml" => Some("XML"),
+        "yaml" | "yml" => Some("YAML"),
+        "md" => Some("Markdown"),
+        _ => None,
+    }
 }
 
 #[tonic::async_trait]
@@ -688,9 +809,66 @@ impl CommitService for CommitServiceImpl {
 
     async fn count_diverging_commits(
         &self,
-        _request: Request<CountDivergingCommitsRequest>,
+        request: Request<CountDivergingCommitsRequest>,
     ) -> Result<Response<CountDivergingCommitsResponse>, Status> {
-        Err(unimplemented_commit_rpc("count_diverging_commits"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+
+        let from = decode_utf8("from", request.from)?;
+        if from.trim().is_empty() {
+            return Err(Status::invalid_argument("from is required"));
+        }
+
+        let to = decode_utf8("to", request.to)?;
+        if to.trim().is_empty() {
+            return Err(Status::invalid_argument("to is required"));
+        }
+
+        let mut args = vec![
+            "rev-list".to_string(),
+            "--left-right".to_string(),
+            "--count".to_string(),
+        ];
+        if request.max_count > 0 {
+            args.push(format!("--max-count={}", request.max_count));
+        }
+        args.push(format!("{from}...{to}"));
+
+        let output = git_output(&repo_path, args.iter().map(String::as_str)).await?;
+        if !output.status.success() {
+            if is_invalid_revision_error(&output) || is_missing_object_error(&output) {
+                return Err(Status::not_found("from or to revision was not found"));
+            }
+
+            return Err(status_for_git_failure(
+                "-C <repo> rev-list --left-right --count <from>...<to>",
+                &output,
+            ));
+        }
+
+        let mut counts = String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if counts.len() != 2 {
+            return Err(Status::internal(
+                "failed to parse diverging commit counts from git rev-list output",
+            ));
+        }
+
+        let right_count = counts
+            .pop()
+            .and_then(|value| value.parse::<i32>().ok())
+            .ok_or_else(|| Status::internal("failed to parse right_count"))?;
+        let left_count = counts
+            .pop()
+            .and_then(|value| value.parse::<i32>().ok())
+            .ok_or_else(|| Status::internal("failed to parse left_count"))?;
+
+        Ok(Response::new(CountDivergingCommitsResponse {
+            left_count,
+            right_count,
+        }))
     }
 
     async fn get_tree_entries(
@@ -1047,30 +1225,296 @@ impl CommitService for CommitServiceImpl {
 
     async fn find_all_commits(
         &self,
-        _request: Request<FindAllCommitsRequest>,
+        request: Request<FindAllCommitsRequest>,
     ) -> Result<Response<Self::FindAllCommitsStream>, Status> {
-        Err(unimplemented_commit_rpc("find_all_commits"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+
+        let mut args = vec!["rev-list".to_string()];
+        match find_all_commits_request::Order::try_from(request.order).ok() {
+            Some(find_all_commits_request::Order::Topo) => args.push("--topo-order".to_string()),
+            Some(find_all_commits_request::Order::Date) => args.push("--date-order".to_string()),
+            _ => {}
+        }
+
+        if request.max_count > 0 {
+            args.push(format!("--max-count={}", request.max_count));
+        }
+        if request.skip > 0 {
+            args.push(format!("--skip={}", request.skip));
+        }
+
+        if request.revision.is_empty() {
+            args.push("--all".to_string());
+        } else {
+            args.push(decode_utf8("revision", request.revision)?);
+        }
+
+        let output = git_output(&repo_path, args.iter().map(String::as_str)).await?;
+        if !output.status.success() {
+            return Err(status_for_git_failure("-C <repo> rev-list ...", &output));
+        }
+
+        Ok(build_stream_response(FindAllCommitsResponse {
+            commits: parse_commit_ids(&output.stdout),
+        }))
     }
 
     async fn find_commits(
         &self,
-        _request: Request<FindCommitsRequest>,
+        request: Request<FindCommitsRequest>,
     ) -> Result<Response<Self::FindCommitsStream>, Status> {
-        Err(unimplemented_commit_rpc("find_commits"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+
+        if request.all && !request.revision.is_empty() {
+            return Err(Status::invalid_argument(
+                "all and revision are mutually exclusive",
+            ));
+        }
+
+        let paths = request
+            .paths
+            .into_iter()
+            .map(|path| decode_utf8("paths", path))
+            .collect::<Result<Vec<_>, _>>()?;
+        if request.follow && paths.len() > 1 {
+            return Err(Status::invalid_argument("follow requires at most one path"));
+        }
+        for path in &paths {
+            validate_request_path("paths", path, false)?;
+        }
+
+        let mut args = vec!["rev-list".to_string()];
+        if request.follow {
+            args.push("--follow".to_string());
+        }
+        if request.skip_merges {
+            args.push("--no-merges".to_string());
+        }
+        if request.first_parent {
+            args.push("--first-parent".to_string());
+        }
+        if request.limit > 0 {
+            args.push(format!("--max-count={}", request.limit));
+        }
+        if request.offset > 0 {
+            args.push(format!("--skip={}", request.offset));
+        }
+        if let Some(after) = request.after {
+            args.push(format!("--since=@{}", after.seconds));
+        }
+        if let Some(before) = request.before {
+            args.push(format!("--until=@{}", before.seconds));
+        }
+        if !request.author.is_empty() {
+            args.push(format!(
+                "--author={}",
+                decode_utf8("author", request.author)?
+            ));
+        }
+        if !request.message_regex.is_empty() {
+            args.push("--regexp-ignore-case".to_string());
+            args.push(format!("--grep={}", request.message_regex));
+        }
+        if matches!(
+            find_commits_request::Order::try_from(request.order).ok(),
+            Some(find_commits_request::Order::Topo)
+        ) {
+            args.push("--topo-order".to_string());
+        }
+
+        if request.all {
+            args.push("--all".to_string());
+        } else if request.revision.is_empty() {
+            args.push("HEAD".to_string());
+        } else {
+            args.push(decode_utf8("revision", request.revision)?);
+        }
+
+        if !paths.is_empty() {
+            args.push("--".to_string());
+            args.extend(paths.into_iter().map(|path| format!(":(literal){path}")));
+        }
+
+        let output = git_output(&repo_path, args.iter().map(String::as_str)).await?;
+        if !output.status.success() {
+            if is_invalid_revision_error(&output) || is_missing_object_error(&output) {
+                return Err(Status::not_found("requested revision was not found"));
+            }
+
+            return Err(status_for_git_failure("-C <repo> rev-list ...", &output));
+        }
+
+        Ok(build_stream_response(FindCommitsResponse {
+            commits: parse_commit_ids(&output.stdout),
+        }))
     }
 
     async fn commit_languages(
         &self,
-        _request: Request<CommitLanguagesRequest>,
+        request: Request<CommitLanguagesRequest>,
     ) -> Result<Response<CommitLanguagesResponse>, Status> {
-        Err(unimplemented_commit_rpc("commit_languages"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+
+        let revision = if request.revision.is_empty() {
+            "HEAD".to_string()
+        } else {
+            decode_utf8("revision", request.revision)?
+        };
+
+        let output = git_output(
+            &repo_path,
+            ["ls-tree", "-r", "-l", "-z", revision.as_str(), "--"],
+        )
+        .await?;
+        if !output.status.success() {
+            if is_invalid_revision_error(&output) || is_missing_object_error(&output) {
+                return Err(Status::not_found(format!(
+                    "revision `{revision}` not found"
+                )));
+            }
+
+            return Err(status_for_git_failure(
+                "-C <repo> ls-tree -r -l -z <revision> --",
+                &output,
+            ));
+        }
+
+        let mut bytes_by_language: HashMap<String, u64> = HashMap::new();
+        for record in output.stdout.split(|byte| *byte == 0) {
+            if record.is_empty() {
+                continue;
+            }
+
+            let Some(path_separator) = record.iter().position(|byte| *byte == b'\t') else {
+                continue;
+            };
+            let header = String::from_utf8_lossy(&record[..path_separator]);
+            let path = String::from_utf8_lossy(&record[path_separator + 1..]).to_string();
+
+            let mut parts = header.split_whitespace();
+            let _mode = parts.next();
+            let object_type = parts.next();
+            let _oid = parts.next();
+            let size = parts.next();
+            if object_type != Some("blob") {
+                continue;
+            }
+
+            let bytes = size
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
+            let language = detect_language(&path).unwrap_or("Other").to_string();
+            *bytes_by_language.entry(language).or_insert(0) += bytes;
+        }
+
+        if bytes_by_language.is_empty() {
+            return Err(Status::failed_precondition(
+                "no languages could be detected for the requested revision",
+            ));
+        }
+
+        let total_bytes = bytes_by_language.values().sum::<u64>();
+        let mut languages = bytes_by_language
+            .into_iter()
+            .map(|(name, bytes)| commit_languages_response::Language {
+                name,
+                share: if total_bytes == 0 {
+                    0.0
+                } else {
+                    ((bytes as f64 / total_bytes as f64) * 100.0) as f32
+                },
+                color: String::new(),
+                bytes,
+                language_id: 0,
+            })
+            .collect::<Vec<_>>();
+        languages.sort_by(|left, right| right.bytes.cmp(&left.bytes));
+
+        Ok(Response::new(CommitLanguagesResponse { languages }))
     }
 
     async fn raw_blame(
         &self,
-        _request: Request<RawBlameRequest>,
+        request: Request<RawBlameRequest>,
     ) -> Result<Response<Self::RawBlameStream>, Status> {
-        Err(unimplemented_commit_rpc("raw_blame"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        if !repo_path.exists() {
+            return Err(Status::not_found("repository does not exist"));
+        }
+
+        let revision = decode_utf8("revision", request.revision)?;
+        if revision.trim().is_empty() {
+            return Err(Status::invalid_argument("revision is required"));
+        }
+
+        let path = decode_utf8("path", request.path)?;
+        validate_request_path("path", &path, false)?;
+
+        if !request.ignore_revisions_blob.is_empty() {
+            return Err(Status::invalid_argument(
+                "ignore_revisions_blob is not supported yet",
+            ));
+        }
+
+        let mut args = vec![
+            "blame".to_string(),
+            "--porcelain".to_string(),
+            revision,
+            "--".to_string(),
+            path,
+        ];
+
+        if !request.range.is_empty() {
+            let range = decode_utf8("range", request.range)?;
+            let Some((start, end)) = range.split_once(',') else {
+                return Err(Status::invalid_argument(
+                    "range must be formatted as `start,end`",
+                ));
+            };
+            let start = start
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| Status::invalid_argument("range start must be a number"))?;
+            let end = end
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| Status::invalid_argument("range end must be a number"))?;
+            if start == 0 || end == 0 || end < start {
+                return Err(Status::invalid_argument(
+                    "range values must be positive and end must be >= start",
+                ));
+            }
+
+            args.splice(
+                2..2,
+                ["-L".to_string(), format!("{start},{end}")].into_iter(),
+            );
+        }
+
+        let output = git_output(&repo_path, args.iter().map(String::as_str)).await?;
+        if !output.status.success() {
+            if is_path_not_found_error(&output) {
+                return Err(Status::not_found(
+                    "path does not exist at the requested revision",
+                ));
+            }
+            if is_invalid_revision_error(&output) || is_missing_object_error(&output) {
+                return Err(Status::not_found("revision does not exist"));
+            }
+
+            return Err(status_for_git_failure(
+                "-C <repo> blame --porcelain ...",
+                &output,
+            ));
+        }
+
+        Ok(build_stream_response(RawBlameResponse {
+            data: output.stdout,
+        }))
     }
 
     async fn last_commit_for_path(
@@ -1141,58 +1585,453 @@ impl CommitService for CommitServiceImpl {
 
     async fn list_last_commits_for_tree(
         &self,
-        _request: Request<ListLastCommitsForTreeRequest>,
+        request: Request<ListLastCommitsForTreeRequest>,
     ) -> Result<Response<Self::ListLastCommitsForTreeStream>, Status> {
-        Err(unimplemented_commit_rpc("list_last_commits_for_tree"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        if !repo_path.exists() {
+            return Err(Status::not_found("repository does not exist"));
+        }
+
+        if request.revision.trim().is_empty() {
+            return Err(Status::invalid_argument("revision is required"));
+        }
+
+        let path = decode_utf8("path", request.path)?;
+        validate_request_path("path", &path, true)?;
+        let path = normalize_request_path(&path);
+
+        let tree_paths = if path.is_empty() {
+            let output = git_output(
+                &repo_path,
+                ["ls-tree", "-z", "--name-only", request.revision.as_str()],
+            )
+            .await?;
+            if !output.status.success() {
+                if is_invalid_revision_error(&output) || is_missing_object_error(&output) {
+                    return Err(Status::not_found(format!(
+                        "revision `{}` not found",
+                        request.revision
+                    )));
+                }
+
+                return Err(status_for_git_failure(
+                    "-C <repo> ls-tree -z --name-only <revision>",
+                    &output,
+                ));
+            }
+
+            parse_null_delimited_paths(&output.stdout)
+        } else {
+            let object_type_output = git_output(
+                &repo_path,
+                [
+                    "cat-file",
+                    "-t",
+                    format!("{}:{path}", request.revision).as_str(),
+                ],
+            )
+            .await?;
+
+            if !object_type_output.status.success() {
+                if is_path_not_found_error(&object_type_output)
+                    || is_invalid_revision_error(&object_type_output)
+                    || is_missing_object_error(&object_type_output)
+                {
+                    return Err(Status::not_found(format!(
+                        "path `{path}` not found at revision `{}`",
+                        request.revision
+                    )));
+                }
+
+                return Err(status_for_git_failure(
+                    "-C <repo> cat-file -t <revision:path>",
+                    &object_type_output,
+                ));
+            }
+
+            let object_type = String::from_utf8_lossy(&object_type_output.stdout)
+                .trim()
+                .to_string();
+
+            if object_type == "tree" {
+                let treeish = format!("{}:{path}", request.revision);
+                let output =
+                    git_output(&repo_path, ["ls-tree", "-z", "--name-only", &treeish]).await?;
+                if !output.status.success() {
+                    return Err(status_for_git_failure(
+                        "-C <repo> ls-tree -z --name-only <treeish>",
+                        &output,
+                    ));
+                }
+
+                parse_null_delimited_paths(&output.stdout)
+                    .into_iter()
+                    .map(|entry| format!("{path}/{entry}"))
+                    .collect()
+            } else {
+                vec![path]
+            }
+        };
+
+        let start = usize::try_from(request.offset.max(0)).unwrap_or(usize::MAX);
+        let mut limited_paths = if start >= tree_paths.len() {
+            Vec::new()
+        } else {
+            tree_paths.into_iter().skip(start).collect::<Vec<_>>()
+        };
+        if request.limit > 0 {
+            limited_paths.truncate(usize::try_from(request.limit).unwrap_or(usize::MAX));
+        }
+
+        let mut commits = Vec::new();
+        for entry_path in limited_paths {
+            let output = git_output(
+                &repo_path,
+                [
+                    "log",
+                    "-1",
+                    "--format=%H",
+                    request.revision.as_str(),
+                    "--",
+                    format!(":(literal){entry_path}").as_str(),
+                ],
+            )
+            .await?;
+
+            if !output.status.success() {
+                return Err(status_for_git_failure(
+                    "-C <repo> log -1 --format=%H <revision> -- <path>",
+                    &output,
+                ));
+            }
+
+            let commit_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if commit_id.is_empty() {
+                continue;
+            }
+
+            commits.push(list_last_commits_for_tree_response::CommitForTree {
+                commit: Some(GitCommit {
+                    id: commit_id,
+                    ..GitCommit::default()
+                }),
+                path_bytes: entry_path.into_bytes(),
+            });
+        }
+
+        Ok(build_stream_response(ListLastCommitsForTreeResponse {
+            commits,
+        }))
     }
 
     async fn commits_by_message(
         &self,
-        _request: Request<CommitsByMessageRequest>,
+        request: Request<CommitsByMessageRequest>,
     ) -> Result<Response<Self::CommitsByMessageStream>, Status> {
-        Err(unimplemented_commit_rpc("commits_by_message"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        if request.query.trim().is_empty() {
+            return Err(Status::invalid_argument("query is required"));
+        }
+
+        let revision = if request.revision.is_empty() {
+            "HEAD".to_string()
+        } else {
+            decode_utf8("revision", request.revision)?
+        };
+
+        let mut args = vec![
+            "log".to_string(),
+            "--format=%H".to_string(),
+            "--regexp-ignore-case".to_string(),
+            format!("--grep={}", request.query),
+            revision,
+        ];
+        if request.offset > 0 {
+            args.push(format!("--skip={}", request.offset));
+        }
+        if request.limit > 0 {
+            args.push(format!("--max-count={}", request.limit));
+        }
+        if !request.path.is_empty() {
+            let path = decode_utf8("path", request.path)?;
+            validate_request_path("path", &path, false)?;
+            args.push("--".to_string());
+            args.push(format!(":(literal){path}"));
+        }
+
+        let output = git_output(&repo_path, args.iter().map(String::as_str)).await?;
+        if !output.status.success() {
+            return Err(status_for_git_failure(
+                "-C <repo> log --format=%H ...",
+                &output,
+            ));
+        }
+
+        Ok(build_stream_response(CommitsByMessageResponse {
+            commits: parse_commit_ids(&output.stdout),
+        }))
     }
 
     async fn list_commits_by_oid(
         &self,
-        _request: Request<ListCommitsByOidRequest>,
+        request: Request<ListCommitsByOidRequest>,
     ) -> Result<Response<Self::ListCommitsByOidStream>, Status> {
-        Err(unimplemented_commit_rpc("list_commits_by_oid"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+
+        let mut commits = Vec::new();
+        for oid in request.oid {
+            if oid.trim().is_empty() {
+                continue;
+            }
+
+            let spec = format!("{oid}^{{commit}}");
+            if let Some(commit_id) = git_resolve_oid(&repo_path, &spec).await? {
+                commits.push(GitCommit {
+                    id: commit_id,
+                    ..GitCommit::default()
+                });
+            }
+        }
+
+        Ok(build_stream_response(ListCommitsByOidResponse { commits }))
     }
 
     async fn list_commits_by_ref_name(
         &self,
-        _request: Request<ListCommitsByRefNameRequest>,
+        request: Request<ListCommitsByRefNameRequest>,
     ) -> Result<Response<Self::ListCommitsByRefNameStream>, Status> {
-        Err(unimplemented_commit_rpc("list_commits_by_ref_name"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+
+        let mut commit_refs = Vec::new();
+        for ref_name in request.ref_names {
+            let ref_name_text = decode_utf8("ref_names", ref_name.clone())?;
+            if ref_name_text.trim().is_empty() {
+                continue;
+            }
+
+            let spec = format!("{ref_name_text}^{{commit}}");
+            if let Some(commit_id) = git_resolve_oid(&repo_path, &spec).await? {
+                commit_refs.push(list_commits_by_ref_name_response::CommitForRef {
+                    commit: Some(GitCommit {
+                        id: commit_id,
+                        ..GitCommit::default()
+                    }),
+                    ref_name,
+                });
+            }
+        }
+
+        Ok(build_stream_response(ListCommitsByRefNameResponse {
+            commit_refs,
+        }))
     }
 
     async fn filter_shas_with_signatures(
         &self,
-        _request: Request<tonic::Streaming<FilterShasWithSignaturesRequest>>,
+        request: Request<tonic::Streaming<FilterShasWithSignaturesRequest>>,
     ) -> Result<Response<Self::FilterShasWithSignaturesStream>, Status> {
-        Err(unimplemented_commit_rpc("filter_shas_with_signatures"))
+        let mut stream = request.into_inner();
+        let mut repository = None;
+        let mut shas = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if repository.is_none() && chunk.repository.is_some() {
+                repository = chunk.repository;
+            }
+            shas.extend(chunk.shas);
+        }
+
+        let repo_path = self.resolve_repo_path(repository)?;
+        let mut signed_shas = Vec::new();
+        for sha in shas {
+            let sha_text = decode_utf8("shas", sha.clone())?;
+            if sha_text.trim().is_empty() {
+                continue;
+            }
+
+            let output = git_output(
+                &repo_path,
+                ["show", "-s", "--format=%G?", sha_text.as_str()],
+            )
+            .await?;
+            if !output.status.success() {
+                if is_invalid_revision_error(&output) || is_missing_object_error(&output) {
+                    continue;
+                }
+
+                return Err(status_for_git_failure(
+                    "-C <repo> show -s --format=%G? <sha>",
+                    &output,
+                ));
+            }
+
+            let has_signature = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .chars()
+                .next()
+                .is_some_and(|marker| marker != 'N');
+            if has_signature {
+                signed_shas.push(sha);
+            }
+        }
+
+        Ok(build_stream_response(FilterShasWithSignaturesResponse {
+            shas: signed_shas,
+        }))
     }
 
     async fn get_commit_signatures(
         &self,
-        _request: Request<GetCommitSignaturesRequest>,
+        request: Request<GetCommitSignaturesRequest>,
     ) -> Result<Response<Self::GetCommitSignaturesStream>, Status> {
-        Err(unimplemented_commit_rpc("get_commit_signatures"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        if request.commit_ids.is_empty() {
+            return Err(Status::invalid_argument(
+                "commit_ids must contain at least one commit",
+            ));
+        }
+
+        let mut responses = Vec::new();
+        for commit_id in request.commit_ids {
+            if commit_id.trim().is_empty() {
+                continue;
+            }
+
+            let output = git_output(&repo_path, ["cat-file", "commit", commit_id.as_str()]).await?;
+            if !output.status.success() {
+                if is_invalid_revision_error(&output) || is_missing_object_error(&output) {
+                    continue;
+                }
+
+                return Err(status_for_git_failure(
+                    "-C <repo> cat-file commit <commit_id>",
+                    &output,
+                ));
+            }
+
+            let parsed = parse_commit_object(&output.stdout);
+            if parsed.signature.is_empty() {
+                continue;
+            }
+
+            responses.push(GetCommitSignaturesResponse {
+                commit_id,
+                signature: parsed.signature,
+                signed_text: output.stdout,
+                signer: get_commit_signatures_response::Signer::User as i32,
+                author: parsed.author,
+                committer: parsed.committer,
+            });
+        }
+
+        Ok(Response::new(Box::pin(tokio_stream::iter(
+            responses.into_iter().map(Ok),
+        ))))
     }
 
     async fn get_commit_messages(
         &self,
-        _request: Request<GetCommitMessagesRequest>,
+        request: Request<GetCommitMessagesRequest>,
     ) -> Result<Response<Self::GetCommitMessagesStream>, Status> {
-        Err(unimplemented_commit_rpc("get_commit_messages"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        if request.commit_ids.is_empty() {
+            return Err(Status::invalid_argument(
+                "commit_ids must contain at least one commit",
+            ));
+        }
+
+        let mut responses = Vec::new();
+        for commit_id in request.commit_ids {
+            if commit_id.trim().is_empty() {
+                continue;
+            }
+
+            let output = git_output(
+                &repo_path,
+                ["show", "-s", "--format=%B", commit_id.as_str()],
+            )
+            .await?;
+            if !output.status.success() {
+                if is_invalid_revision_error(&output) || is_missing_object_error(&output) {
+                    continue;
+                }
+
+                return Err(status_for_git_failure(
+                    "-C <repo> show -s --format=%B <commit_id>",
+                    &output,
+                ));
+            }
+
+            responses.push(GetCommitMessagesResponse {
+                commit_id,
+                message: output.stdout,
+            });
+        }
+
+        Ok(Response::new(Box::pin(tokio_stream::iter(
+            responses.into_iter().map(Ok),
+        ))))
     }
 
     async fn check_objects_exist(
         &self,
-        _request: Request<tonic::Streaming<CheckObjectsExistRequest>>,
+        request: Request<tonic::Streaming<CheckObjectsExistRequest>>,
     ) -> Result<Response<Self::CheckObjectsExistStream>, Status> {
-        Err(unimplemented_commit_rpc("check_objects_exist"))
+        let mut stream = request.into_inner();
+        let mut repository = None;
+        let mut revisions = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if repository.is_none() && chunk.repository.is_some() {
+                repository = chunk.repository;
+            }
+            revisions.extend(chunk.revisions);
+        }
+
+        let repo_path = self.resolve_repo_path(repository)?;
+
+        let mut response_revisions = Vec::new();
+        for revision in revisions {
+            let revision_text = decode_utf8("revisions", revision.clone())?;
+            if revision_text.trim().is_empty() {
+                response_revisions.push(check_objects_exist_response::RevisionExistence {
+                    name: revision,
+                    exists: false,
+                });
+                continue;
+            }
+
+            let output = git_output(
+                &repo_path,
+                ["rev-parse", "--verify", "--quiet", revision_text.as_str()],
+            )
+            .await?;
+
+            if !output.status.success()
+                && !is_invalid_revision_error(&output)
+                && !is_missing_object_error(&output)
+            {
+                return Err(status_for_git_failure(
+                    "-C <repo> rev-parse --verify --quiet <revision>",
+                    &output,
+                ));
+            }
+
+            response_revisions.push(check_objects_exist_response::RevisionExistence {
+                name: revision,
+                exists: output.status.success(),
+            });
+        }
+
+        Ok(build_stream_response(CheckObjectsExistResponse {
+            revisions: response_revisions,
+        }))
     }
 }
 
@@ -1209,9 +2048,13 @@ mod tests {
     use gitaly_proto::gitaly::commit_service_server::CommitService;
     use gitaly_proto::gitaly::get_tree_entries_request;
     use gitaly_proto::gitaly::{
-        tree_entry_response, CommitStatsRequest, CountCommitsRequest, FindCommitRequest,
-        GetTreeEntriesRequest, LastCommitForPathRequest, ListCommitsRequest, ListFilesRequest,
-        PaginationParameter, Repository, TreeEntryRequest,
+        tree_entry_response, CommitLanguagesRequest, CommitStatsRequest, CommitsByMessageRequest,
+        CountCommitsRequest, CountDivergingCommitsRequest, FindAllCommitsRequest,
+        FindCommitRequest, FindCommitsRequest, GetCommitMessagesRequest,
+        GetCommitSignaturesRequest, GetTreeEntriesRequest, LastCommitForPathRequest,
+        ListCommitsByOidRequest, ListCommitsByRefNameRequest, ListCommitsRequest, ListFilesRequest,
+        ListLastCommitsForTreeRequest, PaginationParameter, RawBlameRequest, Repository,
+        TreeEntryRequest,
     };
 
     use crate::dependencies::Dependencies;
@@ -1267,9 +2110,11 @@ mod tests {
 
     struct TestRepo {
         storage_root: std::path::PathBuf,
+        repo_path: std::path::PathBuf,
         service: CommitServiceImpl,
         repository: Repository,
         head_commit: String,
+        feature_commit: String,
         readme_oid: String,
         readme_data: Vec<u8>,
     }
@@ -1302,6 +2147,26 @@ mod tests {
             run_git(&repo_path, &["add", "README.md", "src/lib.rs"]);
             run_git(&repo_path, &["commit", "--quiet", "-m", "second"]);
 
+            let first_commit = run_git_stdout(&repo_path, &["rev-parse", "HEAD~1"]);
+            run_git(
+                &repo_path,
+                &[
+                    "checkout",
+                    "--quiet",
+                    "-b",
+                    "feature",
+                    first_commit.as_str(),
+                ],
+            );
+            std::fs::create_dir_all(repo_path.join("src"))
+                .expect("feature src should be creatable");
+            std::fs::write(repo_path.join("src/feature.rs"), b"pub fn feature() {}\n")
+                .expect("feature.rs should write");
+            run_git(&repo_path, &["add", "src/feature.rs"]);
+            run_git(&repo_path, &["commit", "--quiet", "-m", "feature"]);
+            let feature_commit = run_git_stdout(&repo_path, &["rev-parse", "HEAD"]);
+            run_git(&repo_path, &["checkout", "--quiet", "master"]);
+
             let head_commit = run_git_stdout(&repo_path, &["rev-parse", "HEAD"]);
             let readme_oid = run_git_stdout(&repo_path, &["rev-parse", "HEAD:README.md"]);
             let readme_data =
@@ -1321,9 +2186,11 @@ mod tests {
 
             Self {
                 storage_root,
+                repo_path,
                 service,
                 repository,
                 head_commit,
+                feature_commit,
                 readme_oid,
                 readme_data,
             }
@@ -1552,6 +2419,210 @@ mod tests {
             .expect("missing path lookup should succeed")
             .into_inner();
         assert!(missing_last_commit.commit.is_none());
+    }
+
+    #[tokio::test]
+    async fn remaining_read_methods_return_expected_data() {
+        let test_repo = TestRepo::setup("commit-service-remaining-methods");
+
+        let diverging = test_repo
+            .service
+            .count_diverging_commits(Request::new(CountDivergingCommitsRequest {
+                repository: Some(test_repo.repository.clone()),
+                from: test_repo.head_commit.as_bytes().to_vec(),
+                to: test_repo.feature_commit.as_bytes().to_vec(),
+                max_count: 0,
+            }))
+            .await
+            .expect("count_diverging_commits should succeed")
+            .into_inner();
+        assert!(diverging.left_count >= 1);
+        assert!(diverging.right_count >= 1);
+
+        let mut find_all_stream = test_repo
+            .service
+            .find_all_commits(Request::new(FindAllCommitsRequest {
+                repository: Some(test_repo.repository.clone()),
+                revision: b"HEAD".to_vec(),
+                max_count: 20,
+                ..FindAllCommitsRequest::default()
+            }))
+            .await
+            .expect("find_all_commits should succeed")
+            .into_inner();
+        let find_all_page = find_all_stream
+            .next()
+            .await
+            .expect("find_all_commits should yield")
+            .expect("find_all_commits page should not error");
+        assert!(find_all_page
+            .commits
+            .iter()
+            .any(|commit| commit.id == test_repo.head_commit));
+
+        let mut find_commits_stream = test_repo
+            .service
+            .find_commits(Request::new(FindCommitsRequest {
+                repository: Some(test_repo.repository.clone()),
+                revision: b"HEAD".to_vec(),
+                paths: vec![b"README.md".to_vec()],
+                limit: 20,
+                ..FindCommitsRequest::default()
+            }))
+            .await
+            .expect("find_commits should succeed")
+            .into_inner();
+        let find_commits_page = find_commits_stream
+            .next()
+            .await
+            .expect("find_commits should yield")
+            .expect("find_commits page should not error");
+        assert!(find_commits_page
+            .commits
+            .iter()
+            .any(|commit| commit.id == test_repo.head_commit));
+
+        let languages = test_repo
+            .service
+            .commit_languages(Request::new(CommitLanguagesRequest {
+                repository: Some(test_repo.repository.clone()),
+                revision: b"HEAD".to_vec(),
+            }))
+            .await
+            .expect("commit_languages should succeed")
+            .into_inner();
+        assert!(!languages.languages.is_empty());
+
+        let mut raw_blame_stream = test_repo
+            .service
+            .raw_blame(Request::new(RawBlameRequest {
+                repository: Some(test_repo.repository.clone()),
+                revision: b"HEAD".to_vec(),
+                path: b"README.md".to_vec(),
+                ..RawBlameRequest::default()
+            }))
+            .await
+            .expect("raw_blame should succeed")
+            .into_inner();
+        let raw_blame_page = raw_blame_stream
+            .next()
+            .await
+            .expect("raw_blame should yield")
+            .expect("raw_blame page should not error");
+        assert!(!raw_blame_page.data.is_empty());
+
+        let mut last_commits_for_tree_stream = test_repo
+            .service
+            .list_last_commits_for_tree(Request::new(ListLastCommitsForTreeRequest {
+                repository: Some(test_repo.repository.clone()),
+                revision: "HEAD".to_string(),
+                path: Vec::new(),
+                limit: 10,
+                offset: 0,
+                ..ListLastCommitsForTreeRequest::default()
+            }))
+            .await
+            .expect("list_last_commits_for_tree should succeed")
+            .into_inner();
+        let last_commits_for_tree = last_commits_for_tree_stream
+            .next()
+            .await
+            .expect("list_last_commits_for_tree should yield")
+            .expect("list_last_commits_for_tree page should not error");
+        assert!(!last_commits_for_tree.commits.is_empty());
+
+        let mut commits_by_message_stream = test_repo
+            .service
+            .commits_by_message(Request::new(CommitsByMessageRequest {
+                repository: Some(test_repo.repository.clone()),
+                revision: b"HEAD".to_vec(),
+                query: "second".to_string(),
+                limit: 10,
+                ..CommitsByMessageRequest::default()
+            }))
+            .await
+            .expect("commits_by_message should succeed")
+            .into_inner();
+        let commits_by_message_page = commits_by_message_stream
+            .next()
+            .await
+            .expect("commits_by_message should yield")
+            .expect("commits_by_message page should not error");
+        assert!(commits_by_message_page
+            .commits
+            .iter()
+            .any(|commit| commit.id == test_repo.head_commit));
+
+        let mut commits_by_oid_stream = test_repo
+            .service
+            .list_commits_by_oid(Request::new(ListCommitsByOidRequest {
+                repository: Some(test_repo.repository.clone()),
+                oid: vec![test_repo.head_commit.clone(), "does-not-exist".to_string()],
+            }))
+            .await
+            .expect("list_commits_by_oid should succeed")
+            .into_inner();
+        let commits_by_oid_page = commits_by_oid_stream
+            .next()
+            .await
+            .expect("list_commits_by_oid should yield")
+            .expect("list_commits_by_oid page should not error");
+        assert_eq!(commits_by_oid_page.commits.len(), 1);
+        assert_eq!(commits_by_oid_page.commits[0].id, test_repo.head_commit);
+
+        let mut commits_by_ref_stream = test_repo
+            .service
+            .list_commits_by_ref_name(Request::new(ListCommitsByRefNameRequest {
+                repository: Some(test_repo.repository.clone()),
+                ref_names: vec![
+                    b"refs/heads/master".to_vec(),
+                    b"refs/heads/feature".to_vec(),
+                ],
+            }))
+            .await
+            .expect("list_commits_by_ref_name should succeed")
+            .into_inner();
+        let commits_by_ref_page = commits_by_ref_stream
+            .next()
+            .await
+            .expect("list_commits_by_ref_name should yield")
+            .expect("list_commits_by_ref_name page should not error");
+        assert_eq!(commits_by_ref_page.commit_refs.len(), 2);
+
+        let mut get_signatures_stream = test_repo
+            .service
+            .get_commit_signatures(Request::new(GetCommitSignaturesRequest {
+                repository: Some(test_repo.repository.clone()),
+                commit_ids: vec![test_repo.head_commit.clone()],
+            }))
+            .await
+            .expect("get_commit_signatures should succeed")
+            .into_inner();
+        if let Some(signature_response) = get_signatures_stream.next().await {
+            let signature_response =
+                signature_response.expect("signature response should be valid");
+            assert_eq!(signature_response.commit_id, test_repo.head_commit);
+            assert!(!signature_response.signature.is_empty());
+        }
+
+        let mut get_messages_stream = test_repo
+            .service
+            .get_commit_messages(Request::new(GetCommitMessagesRequest {
+                repository: Some(test_repo.repository.clone()),
+                commit_ids: vec![test_repo.head_commit.clone()],
+            }))
+            .await
+            .expect("get_commit_messages should succeed")
+            .into_inner();
+        let message_page = get_messages_stream
+            .next()
+            .await
+            .expect("get_commit_messages should yield")
+            .expect("get_commit_messages page should not error");
+        assert_eq!(message_page.commit_id, test_repo.head_commit);
+        assert!(String::from_utf8_lossy(&message_page.message).contains("second"));
+
+        assert!(test_repo.repo_path.exists());
     }
 
     #[tokio::test]

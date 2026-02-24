@@ -192,6 +192,28 @@ fn parse_packfile_negotiation_statistics(stdout: &[u8]) -> PackfileNegotiationSt
     }
 }
 
+fn apply_git_command_options(
+    command: &mut Command,
+    git_config_options: &[String],
+    git_protocol: &str,
+) -> Result<(), Status> {
+    for option in git_config_options {
+        if !option.contains('=') {
+            return Err(Status::invalid_argument(
+                "git_config_options entries must be formatted as key=value",
+            ));
+        }
+        command.arg("-c").arg(option);
+    }
+
+    let git_protocol = git_protocol.trim();
+    if !git_protocol.is_empty() {
+        command.env("GIT_PROTOCOL", git_protocol);
+    }
+
+    Ok(())
+}
+
 #[tonic::async_trait]
 impl SshService for SshServiceImpl {
     type SSHUploadPackStream = ServiceStream<SshUploadPackResponse>;
@@ -210,19 +232,11 @@ impl SshService for SshServiceImpl {
 
         let mut command = Command::new("git");
         command.arg("-C").arg(&repo_path);
-        for option in request.git_config_options {
-            if !option.contains('=') {
-                return Err(Status::invalid_argument(
-                    "git_config_options entries must be formatted as key=value",
-                ));
-            }
-            command.arg("-c").arg(option);
-        }
-
-        let git_protocol = request.git_protocol.trim();
-        if !git_protocol.is_empty() {
-            command.env("GIT_PROTOCOL", git_protocol);
-        }
+        apply_git_command_options(
+            &mut command,
+            &request.git_config_options,
+            &request.git_protocol,
+        )?;
 
         command
             .arg("upload-pack")
@@ -263,11 +277,14 @@ impl SshService for SshServiceImpl {
             })?;
 
         let repo_path = self.resolve_repo_path(first_message.repository.take())?;
+        let git_config_options = first_message.git_config_options.clone();
+        let git_protocol = first_message.git_protocol.clone();
         let (response_tx, response_rx) = mpsc::channel(16);
 
         tokio::spawn(async move {
             let task_result: Result<(), Status> = async {
                 let mut command = Command::new("git");
+                apply_git_command_options(&mut command, &git_config_options, &git_protocol)?;
                 command
                     .arg("-C")
                     .arg(&repo_path)
@@ -414,11 +431,14 @@ impl SshService for SshServiceImpl {
             })?;
 
         let repo_path = self.resolve_repo_path(first_message.repository.take())?;
+        let git_config_options = first_message.git_config_options.clone();
+        let git_protocol = first_message.git_protocol.clone();
         let (response_tx, response_rx) = mpsc::channel(16);
 
         tokio::spawn(async move {
             let task_result: Result<(), Status> = async {
                 let mut command = Command::new("git");
+                apply_git_command_options(&mut command, &git_config_options, &git_protocol)?;
                 command
                     .arg("-C")
                     .arg(&repo_path)
@@ -601,7 +621,7 @@ mod tests {
     use gitaly_proto::gitaly::ssh_service_client::SshServiceClient;
     use gitaly_proto::gitaly::ssh_service_server::SshServiceServer;
     use gitaly_proto::gitaly::{
-        Repository, SshReceivePackRequest, SshUploadArchiveRequest,
+        Repository, SshReceivePackRequest, SshUploadArchiveRequest, SshUploadPackRequest,
         SshUploadPackWithSidechannelRequest,
     };
 
@@ -753,6 +773,66 @@ mod tests {
         if storage_root.exists() {
             let _ = std::fs::remove_dir_all(storage_root);
         }
+    }
+
+    #[tokio::test]
+    async fn ssh_upload_pack_rejects_invalid_git_config_options() {
+        let (endpoint, shutdown_tx, server_task) =
+            start_server(SshServiceImpl::new(test_dependencies())).await;
+        let mut client = connect_client(endpoint).await;
+
+        let request_stream = tokio_stream::iter(vec![SshUploadPackRequest {
+            repository: Some(Repository {
+                storage_name: "default".to_string(),
+                relative_path: "group/project.git".to_string(),
+                ..Repository::default()
+            }),
+            git_config_options: vec!["invalid-config".to_string()],
+            git_protocol: String::new(),
+            ..SshUploadPackRequest::default()
+        }]);
+
+        let status = client
+            .ssh_upload_pack(request_stream)
+            .await
+            .expect("rpc call should start")
+            .into_inner()
+            .message()
+            .await
+            .expect_err("stream should fail on invalid git_config_options");
+        assert_eq!(status.code(), Code::InvalidArgument);
+
+        shutdown_server(shutdown_tx, server_task).await;
+    }
+
+    #[tokio::test]
+    async fn ssh_receive_pack_rejects_invalid_git_config_options() {
+        let (endpoint, shutdown_tx, server_task) =
+            start_server(SshServiceImpl::new(test_dependencies())).await;
+        let mut client = connect_client(endpoint).await;
+
+        let request_stream = tokio_stream::iter(vec![SshReceivePackRequest {
+            repository: Some(Repository {
+                storage_name: "default".to_string(),
+                relative_path: "group/project.git".to_string(),
+                ..Repository::default()
+            }),
+            git_config_options: vec!["invalid-config".to_string()],
+            git_protocol: String::new(),
+            ..SshReceivePackRequest::default()
+        }]);
+
+        let status = client
+            .ssh_receive_pack(request_stream)
+            .await
+            .expect("rpc call should start")
+            .into_inner()
+            .message()
+            .await
+            .expect_err("stream should fail on invalid git_config_options");
+        assert_eq!(status.code(), Code::InvalidArgument);
+
+        shutdown_server(shutdown_tx, server_task).await;
     }
 
     #[tokio::test]

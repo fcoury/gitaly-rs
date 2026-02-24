@@ -507,12 +507,140 @@ fn parse_numstat(stdout: &[u8]) -> Vec<DiffStats> {
         .collect()
 }
 
+fn sum_numstat(stdout: &[u8]) -> (i32, i32) {
+    parse_numstat(stdout)
+        .into_iter()
+        .fold((0_i32, 0_i32), |(additions, deletions), stat| {
+            (
+                additions.saturating_add(stat.additions),
+                deletions.saturating_add(stat.deletions),
+            )
+        })
+}
+
 fn parse_numstat_value(value: &str) -> Option<i32> {
     if value == "-" {
         return Some(0);
     }
 
     value.parse::<i32>().ok()
+}
+
+fn parse_utf8_path(value: Vec<u8>, field: &str) -> Result<String, Status> {
+    let parsed = String::from_utf8(value)
+        .map_err(|_| Status::invalid_argument(format!("{field} must be valid UTF-8")))?;
+    validate_required_revision(&parsed, field)?;
+    Ok(parsed)
+}
+
+fn parse_optional_paths(paths: Vec<Vec<u8>>) -> Result<Vec<String>, Status> {
+    paths
+        .into_iter()
+        .enumerate()
+        .map(|(index, path)| parse_utf8_path(path, &format!("paths[{index}]")))
+        .collect()
+}
+
+fn apply_diff_mode_arg(
+    args: &mut Vec<String>,
+    diff_mode: i32,
+    field_name: &str,
+) -> Result<(), Status> {
+    match diff_mode {
+        0 => Ok(()),
+        1 => {
+            args.push("--word-diff=porcelain".to_string());
+            Ok(())
+        }
+        _ => Err(Status::invalid_argument(format!("{field_name} is unknown"))),
+    }
+}
+
+fn apply_whitespace_arg(
+    args: &mut Vec<String>,
+    whitespace_changes: i32,
+    field_name: &str,
+) -> Result<(), Status> {
+    match whitespace_changes {
+        0 => Ok(()),
+        1 => {
+            args.push("--ignore-space-change".to_string());
+            Ok(())
+        }
+        2 => {
+            args.push("--ignore-all-space".to_string());
+            Ok(())
+        }
+        _ => Err(Status::invalid_argument(format!("{field_name} is unknown"))),
+    }
+}
+
+fn build_commit_diff_responses(
+    mut base_response: CommitDiffResponse,
+    patch_data: Vec<u8>,
+) -> Vec<CommitDiffResponse> {
+    if patch_data.is_empty() {
+        base_response.end_of_patch = true;
+        base_response.raw_patch_data = Vec::new();
+        return vec![base_response];
+    }
+
+    let chunk_count = patch_data.chunks(STREAM_CHUNK_SIZE).len();
+    patch_data
+        .chunks(STREAM_CHUNK_SIZE)
+        .enumerate()
+        .map(|(index, chunk)| CommitDiffResponse {
+            raw_patch_data: chunk.to_vec(),
+            end_of_patch: index + 1 == chunk_count,
+            ..base_response.clone()
+        })
+        .collect()
+}
+
+fn build_diff_blobs_responses(
+    left_blob_id: String,
+    right_blob_id: String,
+    patch_data: Vec<u8>,
+    binary: bool,
+    over_patch_bytes_limit: bool,
+    patch_size: i32,
+    lines_added: i32,
+    lines_removed: i32,
+) -> Vec<DiffBlobsResponse> {
+    if patch_data.is_empty() {
+        return vec![DiffBlobsResponse {
+            left_blob_id,
+            right_blob_id,
+            patch: Vec::new(),
+            status: diff_blobs_response::Status::EndOfPatch as i32,
+            binary,
+            over_patch_bytes_limit,
+            patch_size,
+            lines_added,
+            lines_removed,
+        }];
+    }
+
+    let chunk_count = patch_data.chunks(STREAM_CHUNK_SIZE).len();
+    patch_data
+        .chunks(STREAM_CHUNK_SIZE)
+        .enumerate()
+        .map(|(index, chunk)| DiffBlobsResponse {
+            left_blob_id: left_blob_id.clone(),
+            right_blob_id: right_blob_id.clone(),
+            patch: chunk.to_vec(),
+            status: if index + 1 == chunk_count {
+                diff_blobs_response::Status::EndOfPatch as i32
+            } else {
+                diff_blobs_response::Status::Incomplete as i32
+            },
+            binary,
+            over_patch_bytes_limit,
+            patch_size,
+            lines_added,
+            lines_removed,
+        })
+        .collect()
 }
 
 async fn git_output<I, S>(repo_path: &Path, args: I) -> Result<std::process::Output, Status>
@@ -539,10 +667,6 @@ fn status_for_git_failure(args: &str, output: &std::process::Output) -> Status {
     ))
 }
 
-fn unimplemented_diff_rpc(method: &str) -> Status {
-    Status::unimplemented(format!("DiffService::{method} is not implemented"))
-}
-
 #[tonic::async_trait]
 impl DiffService for DiffServiceImpl {
     type CommitDiffStream = ServiceStream<CommitDiffResponse>;
@@ -557,16 +681,138 @@ impl DiffService for DiffServiceImpl {
 
     async fn commit_diff(
         &self,
-        _request: Request<CommitDiffRequest>,
+        request: Request<CommitDiffRequest>,
     ) -> Result<Response<Self::CommitDiffStream>, Status> {
-        Err(unimplemented_diff_rpc("commit_diff"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        validate_commit_pair(&request.left_commit_id, &request.right_commit_id)?;
+        let paths = parse_optional_paths(request.paths)?;
+
+        let mut args = vec![
+            "diff".to_string(),
+            "--full-index".to_string(),
+            "--no-color".to_string(),
+        ];
+        apply_diff_mode_arg(&mut args, request.diff_mode, "diff_mode")?;
+        apply_whitespace_arg(&mut args, request.whitespace_changes, "whitespace_changes")?;
+        args.push(request.left_commit_id.clone());
+        args.push(request.right_commit_id.clone());
+        if !paths.is_empty() {
+            args.push("--".to_string());
+            args.extend(paths.clone());
+        }
+
+        let output = git_output(&repo_path, args.iter().map(String::as_str)).await?;
+        if !output.status.success() {
+            return Err(status_for_git_failure(
+                "-C <repo> diff --full-index --no-color <left> <right>",
+                &output,
+            ));
+        }
+
+        let mut numstat_args = vec!["diff".to_string(), "--numstat".to_string()];
+        numstat_args.push(request.left_commit_id.clone());
+        numstat_args.push(request.right_commit_id.clone());
+        if !paths.is_empty() {
+            numstat_args.push("--".to_string());
+            numstat_args.extend(paths);
+        }
+        let numstat_output =
+            git_output(&repo_path, numstat_args.iter().map(String::as_str)).await?;
+        if !numstat_output.status.success() {
+            return Err(status_for_git_failure(
+                "-C <repo> diff --numstat <left> <right>",
+                &numstat_output,
+            ));
+        }
+        let (lines_added, lines_removed) = sum_numstat(&numstat_output.stdout);
+
+        let binary = String::from_utf8_lossy(&output.stdout).contains("Binary files")
+            || String::from_utf8_lossy(&output.stdout).contains("GIT binary patch");
+        let raw_patch = output.stdout;
+        let mut over_patch_limit = false;
+        let mut patch = raw_patch;
+        if request.max_patch_bytes <= 0 {
+            patch.clear();
+            over_patch_limit = request.max_patch_bytes == 0;
+        } else if i32::try_from(patch.len()).unwrap_or(i32::MAX) > request.max_patch_bytes {
+            patch.clear();
+            over_patch_limit = true;
+        }
+
+        let base_response = CommitDiffResponse {
+            from_path: Vec::new(),
+            to_path: Vec::new(),
+            from_id: request.left_commit_id,
+            to_id: request.right_commit_id,
+            old_mode: 0,
+            new_mode: 0,
+            binary,
+            raw_patch_data: Vec::new(),
+            end_of_patch: false,
+            overflow_marker: over_patch_limit,
+            collapsed: false,
+            too_large: over_patch_limit,
+            lines_added,
+            lines_removed,
+        };
+
+        Ok(stream_from_values(build_commit_diff_responses(
+            base_response,
+            patch,
+        )))
     }
 
     async fn commit_delta(
         &self,
-        _request: Request<CommitDeltaRequest>,
+        request: Request<CommitDeltaRequest>,
     ) -> Result<Response<Self::CommitDeltaStream>, Status> {
-        Err(unimplemented_diff_rpc("commit_delta"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        validate_commit_pair(&request.left_commit_id, &request.right_commit_id)?;
+        let paths = parse_optional_paths(request.paths)?;
+
+        let mut args = vec![
+            "diff".to_string(),
+            "--raw".to_string(),
+            "--no-abbrev".to_string(),
+            "-z".to_string(),
+            request.left_commit_id,
+            request.right_commit_id,
+        ];
+        if !paths.is_empty() {
+            args.push("--".to_string());
+            args.extend(paths);
+        }
+
+        let output = git_output(&repo_path, args.iter().map(String::as_str)).await?;
+        if !output.status.success() {
+            return Err(status_for_git_failure(
+                "-C <repo> diff --raw --no-abbrev -z <left> <right>",
+                &output,
+            ));
+        }
+
+        let deltas = parse_changed_paths_from_raw(&output.stdout, None)
+            .into_iter()
+            .map(|path| {
+                let from_path = if path.old_path.is_empty() {
+                    path.path.clone()
+                } else {
+                    path.old_path
+                };
+                CommitDelta {
+                    from_path,
+                    to_path: path.path,
+                    from_id: path.old_blob_id,
+                    to_id: path.new_blob_id,
+                    old_mode: path.old_mode,
+                    new_mode: path.new_mode,
+                }
+            })
+            .collect();
+
+        Ok(stream_from_values(vec![CommitDeltaResponse { deltas }]))
     }
 
     async fn raw_diff(
@@ -963,9 +1209,96 @@ impl DiffService for DiffServiceImpl {
 
     async fn diff_blobs(
         &self,
-        _request: Request<DiffBlobsRequest>,
+        request: Request<DiffBlobsRequest>,
     ) -> Result<Response<Self::DiffBlobsStream>, Status> {
-        Err(unimplemented_diff_rpc("diff_blobs"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+
+        let mut blob_pairs = request
+            .blob_pairs
+            .into_iter()
+            .enumerate()
+            .map(|(index, pair)| {
+                let left_blob =
+                    parse_utf8_path(pair.left_blob, &format!("blob_pairs[{index}].left_blob"))?;
+                let right_blob =
+                    parse_utf8_path(pair.right_blob, &format!("blob_pairs[{index}].right_blob"))?;
+                Ok((left_blob, right_blob))
+            })
+            .collect::<Result<Vec<_>, Status>>()?;
+
+        if blob_pairs.is_empty() {
+            for changed_path in request.raw_info {
+                if !changed_path.old_blob_id.trim().is_empty()
+                    && !changed_path.new_blob_id.trim().is_empty()
+                {
+                    blob_pairs.push((changed_path.old_blob_id, changed_path.new_blob_id));
+                }
+            }
+        }
+
+        if blob_pairs.is_empty() {
+            return Err(Status::invalid_argument(
+                "blob_pairs or raw_info must include at least one blob pair",
+            ));
+        }
+
+        let mut responses = Vec::new();
+        for (left_blob, right_blob) in blob_pairs {
+            let mut diff_args = vec!["diff".to_string()];
+            apply_diff_mode_arg(&mut diff_args, request.diff_mode, "diff_mode")?;
+            apply_whitespace_arg(
+                &mut diff_args,
+                request.whitespace_changes,
+                "whitespace_changes",
+            )?;
+            diff_args.push(left_blob.clone());
+            diff_args.push(right_blob.clone());
+
+            let diff_output = git_output(&repo_path, diff_args.iter().map(String::as_str)).await?;
+            if !diff_output.status.success() {
+                return Err(status_for_git_failure(
+                    "-C <repo> diff <left_blob> <right_blob>",
+                    &diff_output,
+                ));
+            }
+
+            let numstat_output = git_output(
+                &repo_path,
+                ["diff", "--numstat", left_blob.as_str(), right_blob.as_str()],
+            )
+            .await?;
+            if !numstat_output.status.success() {
+                return Err(status_for_git_failure(
+                    "-C <repo> diff --numstat <left_blob> <right_blob>",
+                    &numstat_output,
+                ));
+            }
+            let (lines_added, lines_removed) = sum_numstat(&numstat_output.stdout);
+
+            let binary = String::from_utf8_lossy(&diff_output.stdout).contains("Binary files")
+                || String::from_utf8_lossy(&diff_output.stdout).contains("GIT binary patch");
+            let patch_size = i32::try_from(diff_output.stdout.len()).unwrap_or(i32::MAX);
+            let mut patch = diff_output.stdout;
+            let mut over_patch_bytes_limit = false;
+            if request.patch_bytes_limit > 0 && patch_size > request.patch_bytes_limit {
+                patch.clear();
+                over_patch_bytes_limit = true;
+            }
+
+            responses.extend(build_diff_blobs_responses(
+                left_blob,
+                right_blob,
+                patch,
+                binary,
+                over_patch_bytes_limit,
+                patch_size,
+                lines_added,
+                lines_removed,
+            ));
+        }
+
+        Ok(stream_from_values(responses))
     }
 }
 
@@ -981,10 +1314,11 @@ mod tests {
 
     use gitaly_proto::gitaly::diff_service_server::DiffService;
     use gitaly_proto::gitaly::{
-        changed_paths, find_changed_paths_request, range_diff_request, range_diff_response,
-        raw_range_diff_request, DiffStatsRequest, FindChangedPathsRequest, GetPatchIdRequest,
-        RangeDiffRequest, RangePair, RawDiffRequest, RawPatchRequest, RawRangeDiffRequest,
-        Repository,
+        changed_paths, diff_blobs_request, diff_blobs_response, find_changed_paths_request,
+        range_diff_request, range_diff_response, raw_range_diff_request, CommitDeltaRequest,
+        CommitDiffRequest, DiffBlobsRequest, DiffStatsRequest, FindChangedPathsRequest,
+        GetPatchIdRequest, RangeDiffRequest, RangePair, RawDiffRequest, RawPatchRequest,
+        RawRangeDiffRequest, Repository,
     };
 
     use crate::dependencies::Dependencies;
@@ -1147,6 +1481,93 @@ mod tests {
         assert_eq!(first_page.stats[0].path, b"README.md".to_vec());
         assert_eq!(first_page.stats[0].additions, 1);
         assert_eq!(first_page.stats[0].deletions, 0);
+
+        if storage_root.exists() {
+            std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
+        }
+    }
+
+    #[tokio::test]
+    async fn commit_diff_commit_delta_and_diff_blobs_return_stream_data() {
+        let (storage_root, repo_path, service, repository) = init_test_repo("diff-methods");
+
+        std::fs::write(repo_path.join("README.md"), b"hello\n").expect("README should write");
+        run_git(&repo_path, &["add", "README.md"]);
+        run_git(&repo_path, &["commit", "--quiet", "-m", "initial"]);
+
+        std::fs::write(repo_path.join("README.md"), b"hello\nworld\n")
+            .expect("README should update");
+        run_git(&repo_path, &["add", "README.md"]);
+        run_git(&repo_path, &["commit", "--quiet", "-m", "update"]);
+
+        let left = git_stdout(&repo_path, &["rev-parse", "HEAD~1"]);
+        let right = git_stdout(&repo_path, &["rev-parse", "HEAD"]);
+
+        let mut commit_diff_stream = service
+            .commit_diff(Request::new(CommitDiffRequest {
+                repository: Some(repository.clone()),
+                left_commit_id: left.clone(),
+                right_commit_id: right.clone(),
+                ..CommitDiffRequest::default()
+            }))
+            .await
+            .expect("commit_diff should succeed")
+            .into_inner();
+        let mut commit_diff_responses = Vec::new();
+        while let Some(response) = commit_diff_stream.next().await {
+            commit_diff_responses.push(response.expect("commit_diff response should not error"));
+        }
+        assert!(!commit_diff_responses.is_empty());
+        assert!(
+            commit_diff_responses
+                .last()
+                .expect("commit_diff should return at least one response")
+                .end_of_patch
+        );
+
+        let mut commit_delta_stream = service
+            .commit_delta(Request::new(CommitDeltaRequest {
+                repository: Some(repository.clone()),
+                left_commit_id: left,
+                right_commit_id: right,
+                ..CommitDeltaRequest::default()
+            }))
+            .await
+            .expect("commit_delta should succeed")
+            .into_inner();
+        let commit_delta_response = commit_delta_stream
+            .next()
+            .await
+            .expect("commit_delta should return one response")
+            .expect("commit_delta response should not error");
+        assert!(!commit_delta_response.deltas.is_empty());
+
+        let left_blob = "HEAD~1:README.md".to_string();
+        let right_blob = "HEAD:README.md".to_string();
+        let mut diff_blobs_stream = service
+            .diff_blobs(Request::new(DiffBlobsRequest {
+                repository: Some(repository),
+                blob_pairs: vec![diff_blobs_request::BlobPair {
+                    left_blob: left_blob.as_bytes().to_vec(),
+                    right_blob: right_blob.as_bytes().to_vec(),
+                }],
+                ..DiffBlobsRequest::default()
+            }))
+            .await
+            .expect("diff_blobs should succeed")
+            .into_inner();
+        let mut diff_blob_responses = Vec::new();
+        while let Some(response) = diff_blobs_stream.next().await {
+            diff_blob_responses.push(response.expect("diff_blobs response should not error"));
+        }
+        assert!(!diff_blob_responses.is_empty());
+        assert_eq!(
+            diff_blob_responses
+                .last()
+                .expect("diff_blobs should return at least one response")
+                .status,
+            diff_blobs_response::Status::EndOfPatch as i32
+        );
 
         if storage_root.exists() {
             std::fs::remove_dir_all(storage_root).expect("storage root should be removable");

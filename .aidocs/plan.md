@@ -30,8 +30,8 @@ Last updated: 2026-02-24
 | T00 | Archive existing docs and reset active tracker | `.aidocs/` | done | Moved previous docs to `.aidocs/historical/2026-02-24/` and created this plan |
 | T01 | Productionize middleware chain foundations | `crates/gitaly-server/src/middleware/*` | done | Correlation/request-info/log-fields/logging/metrics/status/sidechannel/auth baselines implemented and wired |
 | T02 | Close remaining Phase 6 read RPC gaps | `service/{commit,diff,ref_,blob,ssh}.rs` | in_progress | Split into focused slices for deterministic commits |
-| T02a | Implement remaining DiffService read RPCs | `service/diff.rs` | pending | `commit_diff`, `commit_delta`, `diff_blobs` |
-| T02b | Implement remaining RefService read RPCs | `service/ref_.rs` | pending | `find_all_branches`, `find_tag`, `find_all_remote_branches`, etc. |
+| T02a | Implement remaining DiffService read RPCs | `service/diff.rs` | done | Implemented `commit_diff`, `commit_delta`, and `diff_blobs` with focused tests |
+| T02b | Implement remaining RefService read RPCs | `service/ref_.rs` | in_progress | `find_all_branches`, `find_tag`, `find_all_remote_branches`, etc. |
 | T02c | Implement remaining BlobService read RPCs | `service/blob.rs` | pending | `list_all_blobs`, LFS pointer listing RPCs |
 | T02d | Implement remaining CommitService read RPCs | `service/commit.rs` | pending | remove `unimplemented` for remaining read methods |
 | T02e | Implement SSH sidechannel read RPC baseline | `service/ssh.rs` | pending | `ssh_upload_pack_with_sidechannel` |
@@ -43,19 +43,21 @@ Last updated: 2026-02-24
 
 ## Current Task Detail
 
-### T02a - Implement remaining DiffService read RPCs
+### T02b - Implement remaining RefService read RPCs
 
 Subtasks:
-- Implement `commit_diff`.
-- Implement `commit_delta`.
-- Implement `diff_blobs`.
+- Implement `find_all_branches`.
+- Implement `find_tag`.
+- Implement `find_all_remote_branches`.
+- Implement remaining tag signature/message and `find_refs_by_oid`.
 - Add/update tests for newly implemented methods.
 
 Verification target:
-- `cargo test -p gitaly-server --lib service::diff:: -- --test-threads=1`
+- `cargo test -p gitaly-server --lib service::ref_:: -- --test-threads=1`
 
 ## Changelog
 
 - 2026-02-24: Created active tracker and started T01.
 - 2026-02-24: Completed T01 middleware baseline and auth wiring via config/dependencies.
 - 2026-02-24: Started T02 with T02a as current execution slice.
+- 2026-02-24: Completed T02a by implementing remaining DiffService read RPC stubs.

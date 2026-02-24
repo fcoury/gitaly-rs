@@ -1,6 +1,7 @@
 # gitaly-rs User Guide
 
-This guide covers local usage of the current `gitaly-rs` executable.
+This guide covers local usage of the current `gitaly` executable and its
+`server` subcommand.
 
 It mirrors the practical structure of the Go docs (`README`, `doc/README.md`,
 `doc/beginners_guide.md`, and config docs), but only documents behavior that
@@ -8,7 +9,7 @@ exists in the Rust code today.
 
 ## Current Scope
 
-`gitaly-rs` currently boots a tonic gRPC server and serves `ServerService`
+`gitaly server` boots a tonic gRPC server and serves `ServerService`
 methods:
 
 - `ServerInfo`
@@ -27,7 +28,7 @@ testing.
 
 ## Configuration
 
-`gitaly-rs` uses a TOML config file passed via `--config` or `GITALY_CONFIG`.
+The server uses a TOML config file passed via `--config` or `GITALY_CONFIG`.
 
 ### Required fields
 
@@ -74,13 +75,13 @@ Validation rules:
 From `gitaly-rs/`:
 
 ```bash
-cargo run -- --config /path/to/gitaly.toml
+cargo run -p gitaly -- server --config /path/to/gitaly.toml
 ```
 
 Optional runtime directory:
 
 ```bash
-cargo run -- --config /path/to/gitaly.toml --runtime-dir /tmp/gitaly-rs-runtime
+cargo run -p gitaly -- server --config /path/to/gitaly.toml --runtime-dir /tmp/gitaly-rs-runtime
 ```
 
 Environment variable equivalents:
@@ -91,7 +92,7 @@ Environment variable equivalents:
 Help:
 
 ```bash
-cargo run -- --help
+cargo run -p gitaly -- --help
 ```
 
 ## Smoke Test
@@ -117,7 +118,7 @@ name = "default"
 path = "/tmp/gitaly-storage"
 EOF
 
-cargo run -- --config /tmp/gitaly-rs.toml
+cargo run -p gitaly -- server --config /tmp/gitaly-rs.toml
 ```
 
 2. In another terminal (from repo root `/Users/fcoury/code/gitaly`):
@@ -151,4 +152,3 @@ grpcurl -plaintext -import-path ./proto -proto server.proto -d '{}' 127.0.0.1:23
 - `warning: ... Skipping cluster.proto ... missing proto/raftpb/raft.proto`
   - Known workspace warning from proto generation; unrelated to basic
     `ServerService` runtime behavior.
-

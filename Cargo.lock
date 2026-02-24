@@ -981,6 +981,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gitaly"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gitaly-gateway",
+ "gitaly-rs",
+ "tokio",
+]
+
+[[package]]
 name = "gitaly-auth"
 version = "0.1.0"
 dependencies = [

@@ -19,6 +19,7 @@ members = [
   "crates/gitaly-server",
   "crates/gitaly-proto",
   "crates/gitaly-gateway",
+  "crates/gitaly",
 ]
 resolver = "2"
 

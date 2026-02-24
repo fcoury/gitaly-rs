@@ -26,6 +26,8 @@ const DEFAULT_LIMITER_QUEUE_LIMIT: usize = 0;
 pub struct MiddlewareContext {
     limiter: ConcurrencyLimiter,
     cgroup_manager: Option<Arc<dyn CgroupManager>>,
+    auth_token: Option<String>,
+    allow_unauthenticated: bool,
 }
 
 impl MiddlewareContext {
@@ -34,6 +36,8 @@ impl MiddlewareContext {
         Self {
             limiter,
             cgroup_manager: None,
+            auth_token: None,
+            allow_unauthenticated: false,
         }
     }
 
@@ -46,6 +50,23 @@ impl MiddlewareContext {
     #[must_use]
     pub fn with_cgroup_manager(mut self, cgroup_manager: Arc<dyn CgroupManager>) -> Self {
         self.cgroup_manager = Some(cgroup_manager);
+        self
+    }
+
+    #[must_use]
+    pub fn with_auth_token(
+        mut self,
+        auth_token: impl Into<String>,
+        allow_unauthenticated: bool,
+    ) -> Self {
+        self.auth_token = Some(auth_token.into());
+        self.allow_unauthenticated = allow_unauthenticated;
+        self
+    }
+
+    #[must_use]
+    pub fn with_allow_unauthenticated(mut self, allow_unauthenticated: bool) -> Self {
+        self.allow_unauthenticated = allow_unauthenticated;
         self
     }
 
@@ -64,6 +85,14 @@ impl MiddlewareContext {
     pub(crate) fn cgroup_manager(&self) -> Option<&Arc<dyn CgroupManager>> {
         self.cgroup_manager.as_ref()
     }
+
+    pub(crate) fn auth_token(&self) -> Option<&str> {
+        self.auth_token.as_deref()
+    }
+
+    pub(crate) fn allow_unauthenticated(&self) -> bool {
+        self.allow_unauthenticated
+    }
 }
 
 impl Default for MiddlewareContext {
@@ -74,6 +103,8 @@ impl Default for MiddlewareContext {
                 DEFAULT_LIMITER_QUEUE_LIMIT,
             ),
             cgroup_manager: None,
+            auth_token: None,
+            allow_unauthenticated: false,
         }
     }
 }
@@ -103,7 +134,7 @@ fn run_chain(request: Request<()>, context: &MiddlewareContext) -> Result<Reques
     let request = logging::apply(request)?;
     let request = sentry::apply(request)?;
     let request = status::apply(request)?;
-    let request = auth::apply(request)?;
+    let request = auth::apply(request, context)?;
     let request = limiting::apply(request, context)?;
     let request = cache_invalidation::apply(request)?;
     let request = sidechannel::apply(request)?;
@@ -128,6 +159,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use gitaly_limiter::concurrency::ConcurrencyLimiter;
+    use tonic::Code;
     use tonic::Request;
 
     use gitaly_cgroups::CgroupConfig;
@@ -198,6 +231,15 @@ mod tests {
         );
 
         remove_dir_if_exists(&temp_dir);
+    }
+
+    #[test]
+    fn run_chain_enforces_auth_when_token_is_configured() {
+        let context = MiddlewareContext::new(ConcurrencyLimiter::new(1, 0))
+            .with_auth_token("secret-token", false);
+        let error = run_chain(Request::new(()), &context).expect_err("request should be rejected");
+
+        assert_eq!(error.code(), Code::Unauthenticated);
     }
 
     fn trace_steps(request: &Request<()>) -> Vec<&'static str> {

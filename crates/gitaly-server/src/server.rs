@@ -132,6 +132,13 @@ impl GitalyServer {
             middleware_context = middleware_context.with_platform_cgroup_manager(cgroup_config)?;
         }
 
+        if let Some(auth_token) = dependencies.auth_token.as_deref() {
+            middleware_context =
+                middleware_context.with_auth_token(auth_token, dependencies.auth_transitioning);
+        } else if dependencies.auth_transitioning {
+            middleware_context = middleware_context.with_allow_unauthenticated(true);
+        }
+
         Ok(Self::build_router_with_dependencies_and_middleware_context(
             dependencies,
             Arc::new(middleware_context),

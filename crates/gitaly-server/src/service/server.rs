@@ -145,6 +145,8 @@ mod tests {
                 used: 11,
             }],
             storage_paths: HashMap::new(),
+            auth_token: None,
+            auth_transitioning: false,
             server_signature_public_key: b"ssh-ed25519 AAAA-test-key".to_vec(),
             ready,
         })

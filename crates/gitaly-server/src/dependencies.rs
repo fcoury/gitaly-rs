@@ -34,6 +34,8 @@ pub struct Dependencies {
     pub git_version: String,
     pub storage_statuses: Vec<StorageStatus>,
     pub storage_paths: HashMap<String, PathBuf>,
+    pub auth_token: Option<String>,
+    pub auth_transitioning: bool,
     pub server_signature_public_key: Vec<u8>,
     pub ready: bool,
 }
@@ -71,6 +73,18 @@ impl Dependencies {
     }
 
     #[must_use]
+    pub fn with_auth_token(mut self, auth_token: Option<String>) -> Self {
+        self.auth_token = auth_token;
+        self
+    }
+
+    #[must_use]
+    pub fn with_auth_transitioning(mut self, auth_transitioning: bool) -> Self {
+        self.auth_transitioning = auth_transitioning;
+        self
+    }
+
+    #[must_use]
     pub fn with_server_signature_public_key(
         mut self,
         server_signature_public_key: Vec<u8>,
@@ -93,6 +107,8 @@ impl Default for Dependencies {
             git_version: "unknown".to_string(),
             storage_statuses: vec![StorageStatus::default()],
             storage_paths: HashMap::new(),
+            auth_token: None,
+            auth_transitioning: false,
             server_signature_public_key: Vec::new(),
             ready: true,
         }

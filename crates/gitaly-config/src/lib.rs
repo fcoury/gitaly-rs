@@ -11,6 +11,8 @@ pub struct Config {
     pub internal_addr: String,
     pub storages: Vec<Storage>,
     #[serde(default)]
+    pub auth: AuthConfig,
+    #[serde(default)]
     pub runtime: RuntimeConfig,
 }
 
@@ -18,6 +20,14 @@ pub struct Config {
 pub struct Storage {
     pub name: String,
     pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+pub struct AuthConfig {
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub transitioning: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -195,6 +205,7 @@ mod tests {
                 },
             }
         );
+        assert_eq!(config.auth, AuthConfig::default());
     }
 
     #[test]
@@ -279,6 +290,33 @@ mod tests {
         assert_eq!(config.runtime.limiter.queue_limit, 8);
         assert!(!config.runtime.cgroups.enabled);
         assert_eq!(config.runtime.cgroups.bucket_count, 32);
+    }
+
+    #[test]
+    fn parses_auth_overrides() {
+        let config = Config::from_toml(
+            r#"
+                listen_addr = "127.0.0.1:2305"
+                internal_addr = "127.0.0.1:9236"
+
+                [auth]
+                token = "shared-token"
+                transitioning = true
+
+                [[storages]]
+                name = "default"
+                path = "/var/opt/gitlab/git-data/repositories"
+            "#,
+        )
+        .expect("auth overrides should parse");
+
+        assert_eq!(
+            config.auth,
+            AuthConfig {
+                token: "shared-token".to_string(),
+                transitioning: true,
+            }
+        );
     }
 
     #[test]

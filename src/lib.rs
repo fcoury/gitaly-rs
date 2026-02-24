@@ -154,6 +154,13 @@ fn build_dependencies(config: &Config) -> Dependencies {
         .with_git_version(detect_git_version())
         .with_storage_statuses(storage_statuses)
         .with_storage_paths(storage_paths)
+        .with_auth_token(trimmed_token(&config.auth.token))
+        .with_auth_transitioning(config.auth.transitioning)
+}
+
+fn trimmed_token(token: &str) -> Option<String> {
+    let token = token.trim();
+    (!token.is_empty()).then(|| token.to_string())
 }
 
 fn detect_git_version() -> String {
@@ -291,7 +298,7 @@ fn print_usage() {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_error_hint, CliArgs};
+    use super::{parse_error_hint, trimmed_token, CliArgs};
 
     #[test]
     fn parses_required_config_argument() {
@@ -342,5 +349,12 @@ mod tests {
             hint,
             Some("array fields must use TOML arrays, for example `client_tokens = [\"token\"]`.")
         );
+    }
+
+    #[test]
+    fn trimmed_token_discards_empty_values() {
+        assert_eq!(trimmed_token(""), None);
+        assert_eq!(trimmed_token("   "), None);
+        assert_eq!(trimmed_token(" secret "), Some("secret".to_string()));
     }
 }

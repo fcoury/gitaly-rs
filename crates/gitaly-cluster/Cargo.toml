@@ -11,3 +11,6 @@ workspace = true
 [dependencies]
 gitaly-proto = { path = "../gitaly-proto" }
 openraft.workspace = true
+prost.workspace = true
+serde.workspace = true
+serde_json = "1.0"

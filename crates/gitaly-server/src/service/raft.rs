@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -21,9 +22,10 @@ pub struct RaftServiceImpl {
 impl RaftServiceImpl {
     #[must_use]
     pub fn new(dependencies: Arc<Dependencies>) -> Self {
+        let state_path = cluster_state_path(&dependencies);
         Self {
             dependencies,
-            cluster_state: Arc::new(ClusterStateManager::new()),
+            cluster_state: Arc::new(ClusterStateManager::with_optional_state_path(state_path)),
         }
     }
 
@@ -40,6 +42,19 @@ impl RaftServiceImpl {
             "storage `{storage_name}` is not configured"
         )))
     }
+}
+
+fn cluster_state_path(dependencies: &Dependencies) -> Option<PathBuf> {
+    let mut storages = dependencies.storage_paths.iter().collect::<Vec<_>>();
+    storages.sort_by(|(left_name, left_path), (right_name, right_path)| {
+        left_name
+            .cmp(right_name)
+            .then_with(|| left_path.cmp(right_path))
+    });
+
+    storages
+        .first()
+        .map(|(_, storage_path)| storage_path.join(".gitaly-cluster-state.json"))
 }
 
 fn stream_from_values<T>(values: Vec<T>) -> Response<ServiceStream<T>>
@@ -175,8 +190,12 @@ impl RaftService for RaftServiceImpl {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use tokio::sync::oneshot;
     use tokio::task::JoinHandle;
@@ -195,6 +214,20 @@ mod tests {
     use crate::dependencies::Dependencies;
 
     use super::RaftServiceImpl;
+
+    static TEST_STORAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_storage_root(test_name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("current time should be after unix epoch")
+            .as_nanos();
+        let sequence = TEST_STORAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "gitaly-server-raft-{test_name}-{}-{sequence}-{nanos}",
+            std::process::id()
+        ))
+    }
 
     async fn start_server(
         service: RaftServiceImpl,
@@ -241,7 +274,9 @@ mod tests {
 
     fn test_dependencies() -> Arc<Dependencies> {
         let mut storage_paths = HashMap::new();
-        storage_paths.insert("default".to_string(), std::env::temp_dir());
+        let storage_root = unique_storage_root("state");
+        fs::create_dir_all(&storage_root).expect("test storage root should be created");
+        storage_paths.insert("default".to_string(), storage_root);
         Arc::new(Dependencies::default().with_storage_paths(storage_paths))
     }
 

@@ -1238,6 +1238,9 @@ version = "0.1.0"
 dependencies = [
  "gitaly-proto",
  "openraft",
+ "prost",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

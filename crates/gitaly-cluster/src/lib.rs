@@ -1,4 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use gitaly_proto::gitaly::{
@@ -7,6 +10,8 @@ use gitaly_proto::gitaly::{
     RaftPartitionKey, ReplicaId,
 };
 use openraft::{BasicNode, Config};
+use prost::Message as ProstMessage;
+use serde::{Deserialize, Serialize};
 
 const DEFAULT_CLUSTER_ID: &str = "default";
 const UNKNOWN_PARTITION_KEY: &str = "unknown";
@@ -332,21 +337,260 @@ impl PartitionState {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct ClusterState {
     partitions: HashMap<String, PartitionState>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct StateStore {
     clusters: HashMap<String, ClusterState>,
     partition_to_cluster: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedStateStore {
+    schema_version: u32,
+    clusters: Vec<PersistedClusterState>,
+    partition_to_cluster: Vec<PersistedPartitionToCluster>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedClusterState {
+    cluster_id: String,
+    partitions: Vec<PersistedPartitionState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedPartitionState {
+    partition_key: String,
+    replicas: Vec<PersistedReplicaState>,
+    relative_paths: Vec<String>,
+    leader_id: u64,
+    term: u64,
+    index: u64,
+    messages: Vec<PersistedRecordedMessage>,
+    snapshot: Option<PersistedSnapshotState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedReplicaState {
+    member_id: u64,
+    replica_id: Vec<u8>,
+    last_index: u64,
+    match_index: u64,
+    state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedRecordedMessage {
+    from: u64,
+    to: u64,
+    term: u64,
+    index: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedSnapshotState {
+    destination: String,
+    snapshot_size: u64,
+    term: u64,
+    index: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedPartitionToCluster {
+    partition_key: String,
+    cluster_id: String,
+}
+
+const PERSISTED_STATE_SCHEMA_VERSION: u32 = 1;
+
+impl From<&StateStore> for PersistedStateStore {
+    fn from(state: &StateStore) -> Self {
+        let mut clusters = state.clusters.iter().collect::<Vec<_>>();
+        clusters.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+        let clusters = clusters
+            .into_iter()
+            .map(|(cluster_id, cluster)| {
+                let mut partitions = cluster.partitions.iter().collect::<Vec<_>>();
+                partitions.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+                let partitions =
+                    partitions
+                        .into_iter()
+                        .map(|(_, partition)| {
+                            let mut replicas = partition.replicas.iter().collect::<Vec<_>>();
+                            replicas.sort_by_key(|(member_id, _)| **member_id);
+
+                            let replicas = replicas
+                                .into_iter()
+                                .filter_map(|(member_id, replica)| {
+                                    let mut replica_id = Vec::new();
+                                    replica.replica_id.encode(&mut replica_id).ok()?;
+
+                                    Some(PersistedReplicaState {
+                                        member_id: *member_id,
+                                        replica_id,
+                                        last_index: replica.last_index,
+                                        match_index: replica.match_index,
+                                        state: replica.state.clone(),
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+
+                            let relative_paths = partition.relative_paths.iter().cloned().collect();
+                            let messages = partition
+                                .messages
+                                .iter()
+                                .map(|message| PersistedRecordedMessage {
+                                    from: message.from,
+                                    to: message.to,
+                                    term: message.term,
+                                    index: message.index,
+                                })
+                                .collect();
+                            let snapshot = partition.snapshot.as_ref().map(|snapshot| {
+                                PersistedSnapshotState {
+                                    destination: snapshot.destination.clone(),
+                                    snapshot_size: snapshot.snapshot_size,
+                                    term: snapshot.term,
+                                    index: snapshot.index,
+                                }
+                            });
+
+                            PersistedPartitionState {
+                                partition_key: partition.partition_key.clone(),
+                                replicas,
+                                relative_paths,
+                                leader_id: partition.leader_id,
+                                term: partition.term,
+                                index: partition.index,
+                                messages,
+                                snapshot,
+                            }
+                        })
+                        .collect::<Vec<_>>();
+
+                PersistedClusterState {
+                    cluster_id: cluster_id.clone(),
+                    partitions,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut partition_to_cluster = state.partition_to_cluster.iter().collect::<Vec<_>>();
+        partition_to_cluster.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let partition_to_cluster = partition_to_cluster
+            .into_iter()
+            .map(|(partition_key, cluster_id)| PersistedPartitionToCluster {
+                partition_key: partition_key.clone(),
+                cluster_id: cluster_id.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        Self {
+            schema_version: PERSISTED_STATE_SCHEMA_VERSION,
+            clusters,
+            partition_to_cluster,
+        }
+    }
+}
+
+impl From<PersistedStateStore> for StateStore {
+    fn from(persisted: PersistedStateStore) -> Self {
+        if persisted.schema_version != PERSISTED_STATE_SCHEMA_VERSION {
+            return Self::default();
+        }
+
+        let clusters = persisted
+            .clusters
+            .into_iter()
+            .map(|cluster| {
+                let partitions = cluster
+                    .partitions
+                    .into_iter()
+                    .map(|partition| {
+                        let replicas = partition
+                            .replicas
+                            .into_iter()
+                            .filter_map(|replica| {
+                                let replica_id =
+                                    ReplicaId::decode(replica.replica_id.as_slice()).ok()?;
+                                let member_id = if replica.member_id == 0 {
+                                    replica_id.member_id
+                                } else {
+                                    replica.member_id
+                                };
+                                if member_id == 0 {
+                                    return None;
+                                }
+
+                                let mut replica_state = ReplicaState::new(replica_id);
+                                replica_state.last_index = replica.last_index;
+                                replica_state.match_index = replica.match_index;
+                                replica_state.state = replica.state;
+
+                                Some((member_id, replica_state))
+                            })
+                            .collect::<HashMap<_, _>>();
+                        let relative_paths = partition.relative_paths.into_iter().collect();
+                        let messages = partition
+                            .messages
+                            .into_iter()
+                            .map(|message| RecordedMessage {
+                                from: message.from,
+                                to: message.to,
+                                term: message.term,
+                                index: message.index,
+                            })
+                            .collect::<Vec<_>>();
+                        let snapshot = partition.snapshot.map(|snapshot| SnapshotState {
+                            destination: snapshot.destination,
+                            snapshot_size: snapshot.snapshot_size,
+                            term: snapshot.term,
+                            index: snapshot.index,
+                        });
+
+                        (
+                            partition.partition_key.clone(),
+                            PartitionState {
+                                partition_key: partition.partition_key,
+                                replicas,
+                                relative_paths,
+                                leader_id: partition.leader_id,
+                                term: partition.term,
+                                index: partition.index,
+                                messages,
+                                snapshot,
+                            },
+                        )
+                    })
+                    .collect::<HashMap<_, _>>();
+
+                (cluster.cluster_id, ClusterState { partitions })
+            })
+            .collect::<HashMap<_, _>>();
+
+        let partition_to_cluster = persisted
+            .partition_to_cluster
+            .into_iter()
+            .map(|entry| (entry.partition_key, entry.cluster_id))
+            .collect::<HashMap<_, _>>();
+
+        Self {
+            clusters,
+            partition_to_cluster,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct ClusterStateManager {
     config: Arc<Config>,
     state: RwLock<StateStore>,
+    state_path: Option<PathBuf>,
 }
 
 impl Default for ClusterStateManager {
@@ -361,14 +605,34 @@ impl Default for ClusterStateManager {
         Self {
             config: Arc::new(config),
             state: RwLock::new(StateStore::default()),
+            state_path: None,
         }
     }
 }
 
 impl ClusterStateManager {
+    fn from_state_path(state_path: Option<PathBuf>) -> Self {
+        let manager = Self {
+            state_path,
+            ..Self::default()
+        };
+        manager.load_state();
+        manager
+    }
+
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self::from_state_path(None)
+    }
+
+    #[must_use]
+    pub fn with_state_path(state_path: impl Into<PathBuf>) -> Self {
+        Self::from_state_path(Some(state_path.into()))
+    }
+
+    #[must_use]
+    pub fn with_optional_state_path(state_path: Option<PathBuf>) -> Self {
+        Self::from_state_path(state_path)
     }
 
     #[must_use]
@@ -397,6 +661,10 @@ impl ClusterStateManager {
             .entry(partition_key.clone())
             .or_insert_with(|| PartitionState::new(partition_key));
         partition.record_message(request);
+
+        let state_snapshot = state.clone();
+        drop(state);
+        self.persist_state(&state_snapshot);
     }
 
     #[must_use]
@@ -427,7 +695,13 @@ impl ClusterStateManager {
             .partitions
             .entry(partition_key.clone())
             .or_insert_with(|| PartitionState::new(partition_key));
-        partition.record_snapshot(raft_message, snapshot_size)
+        let snapshot = partition.record_snapshot(raft_message, snapshot_size);
+
+        let state_snapshot = state.clone();
+        drop(state);
+        self.persist_state(&state_snapshot);
+
+        snapshot
     }
 
     pub fn process_join_cluster(&self, request: &JoinClusterRequest) {
@@ -486,6 +760,10 @@ impl ClusterStateManager {
         }
 
         partition.normalize_replica_states();
+
+        let state_snapshot = state.clone();
+        drop(state);
+        self.persist_state(&state_snapshot);
     }
 
     #[must_use]
@@ -540,6 +818,55 @@ impl ClusterStateManager {
             cluster_id: cluster_id.to_string(),
             statistics: Some(statistics),
         }
+    }
+
+    fn load_state(&self) {
+        let Some(state_path) = self.state_path.as_deref() else {
+            return;
+        };
+        let Ok(bytes) = fs::read(state_path) else {
+            return;
+        };
+        let Ok(persisted) = serde_json::from_slice::<PersistedStateStore>(&bytes) else {
+            return;
+        };
+
+        let loaded_state = StateStore::from(persisted);
+        let mut state = self
+            .state
+            .write()
+            .expect("cluster state lock should not be poisoned");
+        *state = loaded_state;
+    }
+
+    fn persist_state(&self, state: &StateStore) {
+        let Some(state_path) = self.state_path.as_deref() else {
+            return;
+        };
+
+        let _ = persist_state_to_path(state_path, state);
+    }
+}
+
+fn persist_state_to_path(state_path: &Path, state: &StateStore) -> io::Result<()> {
+    if let Some(parent) = state_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let serialized = serde_json::to_vec(&PersistedStateStore::from(state))
+        .map_err(|error| io::Error::other(format!("failed to serialize state: {error}")))?;
+    let tmp_path = state_path.with_extension("tmp");
+    fs::write(&tmp_path, serialized)?;
+
+    if let Err(error) = fs::rename(&tmp_path, state_path) {
+        if state_path.exists() {
+            fs::remove_file(state_path)?;
+            fs::rename(&tmp_path, state_path)
+        } else {
+            Err(error)
+        }
+    } else {
+        Ok(())
     }
 }
 
@@ -614,6 +941,10 @@ fn basic_node_for_replica(replica_id: &ReplicaId) -> BasicNode {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use gitaly_proto::gitaly::{
         cluster_statistics, replica_id, ClusterStatistics, GetPartitionsRequest,
@@ -622,6 +953,20 @@ mod tests {
     use gitaly_proto::raftpb::{Message, Snapshot, SnapshotMetadata};
 
     use crate::ClusterStateManager;
+
+    static TEST_STATE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_state_file_path(test_name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("current time should be after unix epoch")
+            .as_nanos();
+        let sequence = TEST_STATE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "gitaly-cluster-{test_name}-{}-{sequence}-{nanos}.json",
+            std::process::id()
+        ))
+    }
 
     fn build_message(cluster_id: &str, partition_key: &str, member_id: u64) -> RaftMessageRequest {
         RaftMessageRequest {
@@ -747,5 +1092,71 @@ mod tests {
                 replica_count: 1,
             })
         );
+    }
+
+    #[test]
+    fn persists_state_and_recovers_on_restart() {
+        let state_file = unique_state_file_path("restart-recovery");
+        let _ = fs::remove_file(&state_file);
+
+        let cluster_id = "cluster-persist";
+        let partition_key = "partition-persist";
+
+        let manager = ClusterStateManager::with_state_path(state_file.clone());
+        manager.record_message(&build_message(cluster_id, partition_key, 1));
+        manager.process_join_cluster(&JoinClusterRequest {
+            partition_key: Some(RaftPartitionKey {
+                value: partition_key.to_string(),
+            }),
+            leader_id: 1,
+            member_id: 2,
+            storage_name: "default".to_string(),
+            relative_path: "group/persist.git".to_string(),
+            replicas: vec![ReplicaId {
+                partition_key: Some(RaftPartitionKey {
+                    value: partition_key.to_string(),
+                }),
+                member_id: 1,
+                storage_name: "default".to_string(),
+                metadata: Some(replica_id::Metadata {
+                    address: "127.0.0.1:2401".to_string(),
+                }),
+                r#type: 1,
+            }],
+        });
+        let _ = manager.record_snapshot(&build_message(cluster_id, partition_key, 1), 2048);
+        drop(manager);
+
+        let restarted = ClusterStateManager::with_state_path(state_file.clone());
+        let partitions = restarted.get_partitions(&GetPartitionsRequest {
+            cluster_id: cluster_id.to_string(),
+            partition_key: Some(RaftPartitionKey {
+                value: partition_key.to_string(),
+            }),
+            relative_path: "group/persist.git".to_string(),
+            include_replica_details: true,
+            include_relative_paths: true,
+            ..GetPartitionsRequest::default()
+        });
+
+        assert_eq!(partitions.len(), 1);
+        let partition = &partitions[0];
+        assert_eq!(partition.cluster_id, cluster_id);
+        assert_eq!(partition.leader_id, 1);
+        assert_eq!(partition.term, 4);
+        assert_eq!(partition.index, 12);
+        assert_eq!(
+            partition.relative_paths,
+            vec!["group/persist.git".to_string()]
+        );
+        assert_eq!(partition.replicas.len(), 2);
+
+        let cluster = restarted.get_cluster_info(cluster_id);
+        let statistics = cluster.statistics.expect("statistics should be present");
+        assert_eq!(statistics.total_partitions, 1);
+        assert_eq!(statistics.total_replicas, 2);
+        assert_eq!(statistics.healthy_partitions, 1);
+
+        let _ = fs::remove_file(state_file);
     }
 }

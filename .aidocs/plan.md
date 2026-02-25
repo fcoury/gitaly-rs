@@ -27,20 +27,20 @@ Last updated: 2026-02-25
 | T09 | Complete Phase 5 observability rollout | middleware + service surfaces | done | Structured logs, metrics, and correlation propagation now cover middleware accept/reject paths with per-reason counters |
 | T10 | Execute Phase 3 durability drills | write path + storage durability | done | Added rollback/corruption durability drills for snapshot restore and backup pointer edge cases (including vanity backup roots) |
 | T11 | Run Phase 4 load/stress gate | load harness + stress profiles | done | Added multi-benchmark stress gate (`repository_exists`, `repository_metadata`, `server_info`) with scripted threshold checks and artifact logging |
-| T12 | Deepen Phase 9 cluster implementation | `gitaly-cluster`, `service/raft.rs` | in_progress | Move from baseline state manager to deeper OpenRaft lifecycle and persistence |
-| T13 | Expand Phase 10 test program | `tests/*`, CI matrix, coverage | pending | Grow integration/chaos/compat/reliability suites and nightly matrix |
+| T12 | Deepen Phase 9 cluster implementation | `gitaly-cluster`, `service/raft.rs` | done | Added persistent cluster-state snapshot/load lifecycle and deterministic raft-service state-path wiring |
+| T13 | Expand Phase 10 test program | `tests/*`, CI matrix, coverage | in_progress | Grow integration/chaos/compat/reliability suites and nightly matrix |
 
 ## Current Task Detail
 
-### T12 - Deepen Phase 9 cluster implementation
+### T13 - Expand Phase 10 test program
 
 Subtasks:
-- Persist cluster state snapshots to disk and load them at startup.
-- Add lifecycle hooks around join/message/snapshot flows to expose persisted state behavior.
-- Expand raft/cluster tests to validate restart recovery and persistence invariants.
+- Expand integration coverage for server RPCs beyond `ServerInfo`.
+- Add reliability coverage for startup/readiness/signature behavior across dependency states.
+- Introduce CI matrix coverage for the expanded integration suites and stress gate checks.
 
 Verification target:
-- Focused `gitaly-cluster` + `service::raft` tests.
+- Focused integration/reliability test suite coverage.
 - `cargo test --workspace -- --test-threads=1`
 
 ## Changelog
@@ -58,3 +58,6 @@ Verification target:
 - 2026-02-25: Completed T11 by adding `stress_repository_metadata` and `stress_server_info` benches, normalizing stress output format, and introducing `scripts/run-stress-suite.sh` plus `docs/stress-gate.md`.
 - 2026-02-25: Verified T11 with `./scripts/run-stress-suite.sh` and `cargo test --workspace -- --test-threads=1`.
 - 2026-02-25: Marked T11 complete and started T12 cluster-depth work.
+- 2026-02-25: Completed T12 by adding persisted `ClusterStateManager` state snapshots/reload, deterministic storage-root-backed state-file selection in `RaftServiceImpl`, and restart-focused cluster persistence tests.
+- 2026-02-25: Verified T12 with `cargo test -p gitaly-cluster -- --test-threads=1`, `cargo test -p gitaly-server --lib service::raft::tests:: -- --test-threads=1`, and `cargo test --workspace -- --test-threads=1`.
+- 2026-02-25: Marked T12 complete and started T13 test-program expansion.

@@ -65,6 +65,7 @@ workspace = true
 anyhow.workspace = true
 gitaly-config = { path = "crates/gitaly-config" }
 gitaly-server = { path = "crates/gitaly-server" }
+gitaly-storage = { path = "crates/gitaly-storage" }
 tokio = { workspace = true, features = ["signal"] }
 
 [dev-dependencies]

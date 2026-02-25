@@ -23,8 +23,8 @@ Last updated: 2026-02-25
 
 | ID | Task | Scope | Status | Notes |
 |---|---|---|---|---|
-| T08 | Close remaining Phase 8 API/tooling gaps | `service/*`, `bins/*`, tooling | in_progress | Build full gap matrix, then close highest-impact RPC/binary/tooling gaps in slices |
-| T09 | Complete Phase 5 observability rollout | middleware + service surfaces | pending | Structured logs, metrics, and correlation propagation across all major RPC paths |
+| T08 | Close remaining Phase 8 API/tooling gaps | `service/*`, `bins/*`, tooling | done | Closed highest-impact gaps: helper binaries now functional and repository backup/restore RPCs implement real snapshot semantics |
+| T09 | Complete Phase 5 observability rollout | middleware + service surfaces | in_progress | Structured logs, metrics, and correlation propagation across all major RPC paths |
 | T10 | Execute Phase 3 durability drills | write path + storage durability | pending | Crash/restart drills, fsync/atomicity checks, snapshot/restore corruption handling |
 | T11 | Run Phase 4 load/stress gate | load harness + stress profiles | pending | Saturation/soak tests with explicit pass/fail SLO thresholds |
 | T12 | Deepen Phase 9 cluster implementation | `gitaly-cluster`, `service/raft.rs` | pending | Move from baseline state manager to deeper OpenRaft lifecycle and persistence |
@@ -32,18 +32,20 @@ Last updated: 2026-02-25
 
 ## Current Task Detail
 
-### T08 - Close remaining Phase 8 API/tooling gaps
+### T09 - Complete Phase 5 observability rollout
 
 Subtasks:
-- Build an explicit RPC/binary/tooling gap matrix from current code.
-- Prioritize high-impact missing RPCs and implement in bounded slices.
-- Replace helper binary placeholders with minimal real functionality where feasible.
+- Extend structured logs coverage for major service paths and error surfaces.
+- Add/normalize request metrics labels and latency/error coverage for key RPC families.
+- Ensure correlation/request context is consistently emitted across request lifecycle logs.
 
 Verification target:
-- `cargo test --workspace`
-- Focused service tests per implemented slice.
+- `cargo test --workspace -- --test-threads=1`
+- Focused middleware + service tests covering logging/metrics fields.
 
 ## Changelog
 
 - 2026-02-25: Archived completed T00-T07 plan to `.aidocs/historical/2026-02-25/plan-t00-t07-complete.md`.
 - 2026-02-25: Created new active plan covering remaining areas (T08-T13).
+- 2026-02-25: Completed T08 gap-closure slice by replacing helper binary placeholders with functional baseline CLIs (`gitaly-hooks`, `gitaly-ssh`, `gitaly-backup`, `gitaly-gpg`, `gitaly-lfs-smudge`, `gitaly-blackbox`) and implementing snapshot-based `backup_repository`/`restore_repository` semantics in `RepositoryService`.
+- 2026-02-25: Marked T08 complete and started T09 observability rollout.

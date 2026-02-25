@@ -3,6 +3,7 @@ use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
+use gitaly_storage::snapshot::{create_snapshot, restore_snapshot};
 use sha2::{Digest, Sha256};
 use tokio::process::Command;
 use tokio_stream::Stream;
@@ -15,6 +16,8 @@ use gitaly_proto::gitaly::*;
 use crate::dependencies::Dependencies;
 
 type ServiceStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
+const HIDDEN_BACKUP_DIRECTORY: &str = ".repository-backups";
+const LATEST_BACKUP_ID: &str = "latest";
 
 #[derive(Debug, Clone)]
 pub struct RepositoryServiceImpl {
@@ -97,6 +100,58 @@ impl RepositoryServiceImpl {
 
         Ok(())
     }
+
+    fn resolve_backup_base_path(
+        &self,
+        repository: Option<Repository>,
+        vanity_repository: Option<Repository>,
+    ) -> Result<PathBuf, Status> {
+        if let Some(vanity_repository) = vanity_repository {
+            return self.resolve_repo_path(Some(vanity_repository));
+        }
+
+        let repo_path = self.resolve_repo_path(repository)?;
+        let parent = repo_path.parent().ok_or_else(|| {
+            Status::invalid_argument("repository.relative_path must include a parent directory")
+        })?;
+        let repository_name = repo_path.file_name().ok_or_else(|| {
+            Status::invalid_argument("repository.relative_path must include a repository name")
+        })?;
+        Ok(parent
+            .join(HIDDEN_BACKUP_DIRECTORY)
+            .join(repository_name.to_owned()))
+    }
+
+    fn resolve_restore_snapshot_path(
+        &self,
+        backup_base_path: &Path,
+        backup_id: &str,
+    ) -> Result<PathBuf, Status> {
+        let backup_id = backup_id.trim();
+        if !backup_id.is_empty() {
+            validate_backup_id(backup_id)?;
+            return Ok(backup_base_path.join(backup_id));
+        }
+
+        let latest_path = backup_base_path.join(LATEST_BACKUP_ID);
+        if latest_path.is_file() {
+            let pointed_backup_id = std::fs::read_to_string(&latest_path).map_err(|err| {
+                Status::internal(format!(
+                    "failed to read latest backup pointer `{}`: {err}",
+                    latest_path.display()
+                ))
+            })?;
+            let pointed_backup_id = pointed_backup_id.trim();
+            if !pointed_backup_id.is_empty() {
+                validate_backup_id(pointed_backup_id).map_err(|_| {
+                    Status::internal("latest backup pointer contains disallowed path components")
+                })?;
+                return Ok(backup_base_path.join(pointed_backup_id));
+            }
+        }
+
+        Ok(backup_base_path.join(LATEST_BACKUP_ID))
+    }
 }
 
 fn validate_relative_path(relative_path: &str) -> Result<(), Status> {
@@ -119,6 +174,21 @@ fn validate_relative_path(relative_path: &str) -> Result<(), Status> {
     }
 
     Ok(())
+}
+
+fn validate_backup_id(backup_id: &str) -> Result<(), Status> {
+    let path = Path::new(backup_id);
+    let mut components = path.components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(()),
+        _ => Err(Status::invalid_argument(
+            "backup_id contains disallowed path components",
+        )),
+    }
+}
+
+fn status_for_snapshot_failure(operation: &str, err: impl std::fmt::Display) -> Status {
+    Status::internal(format!("failed to {operation}: {err}"))
 }
 
 fn parse_output_lines(stdout: &[u8]) -> Vec<String> {
@@ -899,7 +969,62 @@ impl RepositoryService for RepositoryServiceImpl {
         request: Request<BackupRepositoryRequest>,
     ) -> Result<Response<BackupRepositoryResponse>, Status> {
         let request = request.into_inner();
-        self.resolve_existing_repo_path(request.repository)?;
+        let repository = request.repository.clone();
+        let repo_path = self.resolve_existing_repo_path(repository.clone())?;
+        let backup_base_path =
+            self.resolve_backup_base_path(repository, request.vanity_repository)?;
+        let backup_id = request.backup_id.trim();
+        let backup_id = if backup_id.is_empty() {
+            LATEST_BACKUP_ID
+        } else {
+            validate_backup_id(backup_id)?;
+            backup_id
+        };
+
+        std::fs::create_dir_all(&backup_base_path).map_err(|err| {
+            Status::internal(format!(
+                "failed to create backup directory `{}`: {err}",
+                backup_base_path.display()
+            ))
+        })?;
+
+        let latest_path = backup_base_path.join(LATEST_BACKUP_ID);
+        if backup_id == LATEST_BACKUP_ID && latest_path.is_file() {
+            std::fs::remove_file(&latest_path).map_err(|err| {
+                Status::internal(format!(
+                    "failed to remove latest backup pointer `{}`: {err}",
+                    latest_path.display()
+                ))
+            })?;
+        } else if backup_id != LATEST_BACKUP_ID && latest_path.is_dir() {
+            std::fs::remove_dir_all(&latest_path).map_err(|err| {
+                Status::internal(format!(
+                    "failed to remove latest backup directory `{}`: {err}",
+                    latest_path.display()
+                ))
+            })?;
+        }
+
+        let backup_path = backup_base_path.join(backup_id);
+        create_snapshot(&repo_path, &backup_path).map_err(|err| {
+            status_for_snapshot_failure(
+                &format!(
+                    "create repository backup at `{}`",
+                    backup_path.to_string_lossy()
+                ),
+                err,
+            )
+        })?;
+
+        if backup_id != LATEST_BACKUP_ID {
+            std::fs::write(&latest_path, format!("{backup_id}\n")).map_err(|err| {
+                Status::internal(format!(
+                    "failed to write latest backup pointer `{}`: {err}",
+                    latest_path.display()
+                ))
+            })?;
+        }
+
         Ok(Response::new(BackupRepositoryResponse::default()))
     }
 
@@ -908,7 +1033,34 @@ impl RepositoryService for RepositoryServiceImpl {
         request: Request<RestoreRepositoryRequest>,
     ) -> Result<Response<RestoreRepositoryResponse>, Status> {
         let request = request.into_inner();
-        self.resolve_existing_repo_path(request.repository)?;
+        let repository = request.repository.clone();
+        let repo_path = self.resolve_repo_path(repository.clone())?;
+        let backup_base_path =
+            self.resolve_backup_base_path(repository, request.vanity_repository)?;
+        let snapshot_path =
+            self.resolve_restore_snapshot_path(&backup_base_path, &request.backup_id)?;
+
+        if !snapshot_path.exists() {
+            if request.always_create {
+                if !repo_path.exists() {
+                    self.init_bare_repo_at(&repo_path).await?;
+                }
+                return Ok(Response::new(RestoreRepositoryResponse::default()));
+            }
+
+            return Err(Status::not_found("repository backup does not exist"));
+        }
+
+        restore_snapshot(&snapshot_path, &repo_path).map_err(|err| {
+            status_for_snapshot_failure(
+                &format!(
+                    "restore repository from backup `{}`",
+                    snapshot_path.to_string_lossy()
+                ),
+                err,
+            )
+        })?;
+
         Ok(Response::new(RestoreRepositoryResponse::default()))
     }
 
@@ -953,10 +1105,11 @@ mod tests {
     use gitaly_proto::gitaly::repository_service_server::RepositoryService;
     use gitaly_proto::gitaly::{
         migrate_reference_backend_request::ReferenceBackend as MigrateReferenceBackend,
-        CreateBundleRequest, CreateRepositoryRequest, FetchRemoteRequest, FindMergeBaseRequest,
-        GetArchiveRequest, GetObjectDirectorySizeRequest, HasLocalBranchesRequest,
-        MigrateReferenceBackendRequest, ObjectFormat, ObjectFormatRequest, RemoveRepositoryRequest,
-        Repository, RepositoryExistsRequest,
+        BackupRepositoryRequest, CreateBundleRequest, CreateRepositoryRequest, FetchRemoteRequest,
+        FindMergeBaseRequest, GetArchiveRequest, GetObjectDirectorySizeRequest,
+        HasLocalBranchesRequest, MigrateReferenceBackendRequest, ObjectFormat,
+        ObjectFormatRequest, RemoveRepositoryRequest, Repository, RepositoryExistsRequest,
+        RestoreRepositoryRequest,
     };
 
     use crate::dependencies::Dependencies;
@@ -1254,6 +1407,146 @@ mod tests {
             .expect("migrate_reference_backend should return baseline response")
             .into_inner();
         assert!(migrated.time.is_none());
+
+        if storage_root.exists() {
+            std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
+        }
+    }
+
+    #[tokio::test]
+    async fn backup_and_restore_repository_round_trip_restores_bare_repo_metadata() {
+        let (storage_root, service, repository) =
+            setup_service_with_repository("repository-service-backup-restore-round-trip").await;
+
+        let repo_path = storage_root.join("project.git");
+        let attributes_path = repo_path.join("info").join("attributes");
+        std::fs::create_dir_all(
+            attributes_path
+                .parent()
+                .expect("attributes file should have a parent directory"),
+        )
+        .expect("attributes parent should be creatable");
+        std::fs::write(&attributes_path, b"*.rs text eol=lf\n")
+            .expect("attributes should be writable");
+
+        service
+            .backup_repository(Request::new(BackupRepositoryRequest {
+                repository: Some(repository.clone()),
+                backup_id: "round-trip-backup".to_string(),
+                ..BackupRepositoryRequest::default()
+            }))
+            .await
+            .expect("backup_repository should succeed");
+
+        std::fs::write(&attributes_path, b"corrupted\n").expect("attributes should mutate");
+        std::fs::write(repo_path.join("dangling.tmp"), b"temp").expect("temp file should write");
+
+        service
+            .restore_repository(Request::new(RestoreRepositoryRequest {
+                repository: Some(repository),
+                backup_id: "round-trip-backup".to_string(),
+                ..RestoreRepositoryRequest::default()
+            }))
+            .await
+            .expect("restore_repository should succeed");
+
+        let attributes = std::fs::read_to_string(&attributes_path)
+            .expect("restored attributes file should be readable");
+        assert_eq!(attributes, "*.rs text eol=lf\n");
+        assert!(
+            !repo_path.join("dangling.tmp").exists(),
+            "restore should replace target with snapshot contents"
+        );
+
+        if storage_root.exists() {
+            std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_repository_without_backup_uses_always_create_to_initialize_target() {
+        let storage_root = unique_dir("repository-service-restore-always-create");
+        std::fs::create_dir_all(&storage_root).expect("storage root should be creatable");
+
+        let mut storage_paths = HashMap::new();
+        storage_paths.insert("default".to_string(), storage_root.clone());
+        let dependencies = Arc::new(Dependencies::default().with_storage_paths(storage_paths));
+        let service = RepositoryServiceImpl::new(dependencies);
+
+        let repository = Repository {
+            storage_name: "default".to_string(),
+            relative_path: "project.git".to_string(),
+            ..Repository::default()
+        };
+        let repo_path = storage_root.join("project.git");
+
+        let missing = service
+            .restore_repository(Request::new(RestoreRepositoryRequest {
+                repository: Some(repository.clone()),
+                always_create: false,
+                ..RestoreRepositoryRequest::default()
+            }))
+            .await
+            .expect_err("missing backup without always_create should fail");
+        assert_eq!(missing.code(), tonic::Code::NotFound);
+        assert!(
+            !repo_path.exists(),
+            "repository should not be created when always_create=false"
+        );
+
+        service
+            .restore_repository(Request::new(RestoreRepositoryRequest {
+                repository: Some(repository),
+                always_create: true,
+                ..RestoreRepositoryRequest::default()
+            }))
+            .await
+            .expect("always_create=true should initialize the repository");
+        assert!(
+            repo_path.exists(),
+            "repository path should exist after always_create restore"
+        );
+        run_git(&repo_path, &["rev-parse", "--git-dir"]);
+
+        if storage_root.exists() {
+            std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_repository_with_empty_backup_id_uses_latest_pointer_file() {
+        let (storage_root, service, repository) =
+            setup_service_with_repository("repository-service-restore-latest-pointer").await;
+
+        let repo_path = storage_root.join("project.git");
+        let description_path = repo_path.join("description");
+        std::fs::write(&description_path, b"initial description\n")
+            .expect("description should be writable");
+
+        service
+            .backup_repository(Request::new(BackupRepositoryRequest {
+                repository: Some(repository.clone()),
+                backup_id: "backup-v1".to_string(),
+                ..BackupRepositoryRequest::default()
+            }))
+            .await
+            .expect("named backup should succeed");
+
+        std::fs::write(&description_path, b"mutated description\n")
+            .expect("description should mutate");
+
+        service
+            .restore_repository(Request::new(RestoreRepositoryRequest {
+                repository: Some(repository),
+                backup_id: String::new(),
+                ..RestoreRepositoryRequest::default()
+            }))
+            .await
+            .expect("restore with empty backup_id should use latest pointer");
+
+        let description =
+            std::fs::read_to_string(&description_path).expect("description should be readable");
+        assert_eq!(description, "initial description\n");
 
         if storage_root.exists() {
             std::fs::remove_dir_all(storage_root).expect("storage root should be removable");

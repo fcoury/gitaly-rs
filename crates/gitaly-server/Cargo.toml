@@ -15,6 +15,7 @@ gitaly-config = { path = "../gitaly-config" }
 gitaly-git = { path = "../gitaly-git" }
 gitaly-limiter = { path = "../gitaly-limiter" }
 gitaly-proto = { path = "../gitaly-proto" }
+gitaly-storage = { path = "../gitaly-storage" }
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

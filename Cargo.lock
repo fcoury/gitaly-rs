@@ -1319,6 +1319,7 @@ dependencies = [
  "gitaly-config",
  "gitaly-proto",
  "gitaly-server",
+ "gitaly-storage",
  "tokio",
  "tonic",
 ]
@@ -1333,6 +1334,7 @@ dependencies = [
  "gitaly-git",
  "gitaly-limiter",
  "gitaly-proto",
+ "gitaly-storage",
  "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",

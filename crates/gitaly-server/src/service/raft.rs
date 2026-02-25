@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
+use gitaly_cluster::ClusterStateManager;
 use gitaly_proto::gitaly::raft_service_server::RaftService;
 use gitaly_proto::gitaly::*;
 
@@ -14,12 +15,16 @@ type ServiceStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 's
 #[derive(Debug, Clone)]
 pub struct RaftServiceImpl {
     dependencies: Arc<Dependencies>,
+    cluster_state: Arc<ClusterStateManager>,
 }
 
 impl RaftServiceImpl {
     #[must_use]
     pub fn new(dependencies: Arc<Dependencies>) -> Self {
-        Self { dependencies }
+        Self {
+            dependencies,
+            cluster_state: Arc::new(ClusterStateManager::new()),
+        }
     }
 
     fn ensure_storage_configured(&self, storage_name: &str) -> Result<(), Status> {
@@ -63,6 +68,7 @@ impl RaftService for RaftServiceImpl {
             if message.cluster_id.trim().is_empty() {
                 return Err(Status::invalid_argument("cluster_id is required"));
             }
+            self.cluster_state.record_message(&message);
         }
 
         if !saw_message {
@@ -80,6 +86,7 @@ impl RaftService for RaftServiceImpl {
     ) -> Result<Response<RaftSnapshotMessageResponse>, Status> {
         let mut stream = request.into_inner();
         let mut saw_header = false;
+        let mut header = None;
         let mut snapshot_size = 0_u64;
 
         while let Some(message) = stream
@@ -93,6 +100,7 @@ impl RaftService for RaftServiceImpl {
                         return Err(Status::invalid_argument("cluster_id is required"));
                     }
                     saw_header = true;
+                    header = Some(raft_msg);
                 }
                 Some(raft_snapshot_message_request::RaftSnapshotPayload::Chunk(chunk)) => {
                     snapshot_size = snapshot_size.saturating_add(chunk.len() as u64);
@@ -107,9 +115,13 @@ impl RaftService for RaftServiceImpl {
             ));
         }
 
+        let snapshot_record = self
+            .cluster_state
+            .record_snapshot(&header.expect("header should exist"), snapshot_size);
+
         Ok(Response::new(RaftSnapshotMessageResponse {
-            destination: "in-memory".to_string(),
-            snapshot_size,
+            destination: snapshot_record.destination,
+            snapshot_size: snapshot_record.snapshot_size,
         }))
     }
 
@@ -126,6 +138,8 @@ impl RaftService for RaftServiceImpl {
             return Err(Status::invalid_argument("partition_key is required"));
         }
 
+        self.cluster_state.process_join_cluster(&request);
+
         Ok(Response::new(JoinClusterResponse {}))
     }
 
@@ -138,24 +152,7 @@ impl RaftService for RaftServiceImpl {
             return Err(Status::invalid_argument("cluster_id is required"));
         }
 
-        let mut responses = Vec::new();
-        if let Some(partition_key) = request.partition_key {
-            responses.push(GetPartitionsResponse {
-                cluster_id: request.cluster_id.clone(),
-                partition_key: Some(partition_key),
-                replicas: Vec::new(),
-                leader_id: 0,
-                term: 0,
-                index: 0,
-                relative_path: request.relative_path.clone(),
-                relative_paths: if request.include_relative_paths && !request.relative_path.is_empty()
-                {
-                    vec![request.relative_path]
-                } else {
-                    Vec::new()
-                },
-            });
-        }
+        let responses = self.cluster_state.get_partitions(&request);
 
         Ok(stream_from_values(responses))
     }
@@ -169,16 +166,9 @@ impl RaftService for RaftServiceImpl {
             return Err(Status::invalid_argument("cluster_id is required"));
         }
 
-        Ok(Response::new(RaftClusterInfoResponse {
-            cluster_id: request.cluster_id,
-            statistics: Some(ClusterStatistics {
-                total_partitions: 0,
-                healthy_partitions: 0,
-                total_replicas: 0,
-                healthy_replicas: 0,
-                storage_stats: std::collections::HashMap::new(),
-            }),
-        }))
+        Ok(Response::new(
+            self.cluster_state.get_cluster_info(&request.cluster_id),
+        ))
     }
 }
 
@@ -196,9 +186,11 @@ mod tests {
     use gitaly_proto::gitaly::raft_service_client::RaftServiceClient;
     use gitaly_proto::gitaly::raft_service_server::RaftServiceServer;
     use gitaly_proto::gitaly::{
-        replica_id, GetPartitionsRequest, JoinClusterRequest, RaftClusterInfoRequest,
-        RaftMessageRequest, RaftPartitionKey, ReplicaId,
+        raft_snapshot_message_request, replica_id, GetPartitionsRequest, JoinClusterRequest,
+        RaftClusterInfoRequest, RaftMessageRequest, RaftPartitionKey, RaftSnapshotMessageRequest,
+        ReplicaId,
     };
+    use gitaly_proto::raftpb::{Message, Snapshot, SnapshotMetadata};
 
     use crate::dependencies::Dependencies;
 
@@ -254,19 +246,123 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_message_and_get_partitions_return_structured_responses() {
+    async fn raft_state_reflects_message_join_and_snapshot_flows() {
         let (endpoint, shutdown_tx, server_task) =
             start_server(RaftServiceImpl::new(test_dependencies())).await;
         let mut client = connect_client(endpoint).await;
 
         let message_stream = tokio_stream::iter(vec![RaftMessageRequest {
             cluster_id: "cluster-a".to_string(),
+            replica_id: Some(ReplicaId {
+                partition_key: Some(RaftPartitionKey {
+                    value: "partition-a".to_string(),
+                }),
+                member_id: 1,
+                storage_name: "default".to_string(),
+                metadata: Some(replica_id::Metadata {
+                    address: "127.0.0.1:2301".to_string(),
+                }),
+                r#type: replica_id::ReplicaType::Voter as i32,
+            }),
+            message: Some(Message {
+                from: Some(1),
+                term: Some(4),
+                index: Some(12),
+                ..Message::default()
+            }),
             ..RaftMessageRequest::default()
         }]);
         client
             .send_message(message_stream)
             .await
             .expect("send_message should succeed");
+
+        client
+            .send_snapshot(tokio_stream::iter(vec![
+                RaftSnapshotMessageRequest {
+                    raft_snapshot_payload: Some(
+                        raft_snapshot_message_request::RaftSnapshotPayload::RaftMsg(
+                            RaftMessageRequest {
+                                cluster_id: "cluster-a".to_string(),
+                                replica_id: Some(ReplicaId {
+                                    partition_key: Some(RaftPartitionKey {
+                                        value: "partition-a".to_string(),
+                                    }),
+                                    member_id: 1,
+                                    storage_name: "default".to_string(),
+                                    metadata: Some(replica_id::Metadata {
+                                        address: "127.0.0.1:2301".to_string(),
+                                    }),
+                                    r#type: replica_id::ReplicaType::Voter as i32,
+                                }),
+                                message: Some(Message {
+                                    from: Some(1),
+                                    term: Some(5),
+                                    index: Some(20),
+                                    snapshot: Some(Snapshot {
+                                        metadata: Some(SnapshotMetadata {
+                                            conf_state: None,
+                                            index: Some(20),
+                                            term: Some(5),
+                                        }),
+                                        data: None,
+                                    }),
+                                    ..Message::default()
+                                }),
+                            },
+                        ),
+                    ),
+                },
+                RaftSnapshotMessageRequest {
+                    raft_snapshot_payload: Some(
+                        raft_snapshot_message_request::RaftSnapshotPayload::Chunk(vec![1; 8]),
+                    ),
+                },
+                RaftSnapshotMessageRequest {
+                    raft_snapshot_payload: Some(
+                        raft_snapshot_message_request::RaftSnapshotPayload::Chunk(vec![2; 8]),
+                    ),
+                },
+            ]))
+            .await
+            .expect("send_snapshot should succeed");
+
+        client
+            .join_cluster(JoinClusterRequest {
+                partition_key: Some(RaftPartitionKey {
+                    value: "partition-a".to_string(),
+                }),
+                leader_id: 1,
+                member_id: 2,
+                storage_name: "default".to_string(),
+                relative_path: "group/project.git".to_string(),
+                replicas: vec![
+                    ReplicaId {
+                        partition_key: Some(RaftPartitionKey {
+                            value: "partition-a".to_string(),
+                        }),
+                        member_id: 1,
+                        storage_name: "default".to_string(),
+                        metadata: Some(replica_id::Metadata {
+                            address: "127.0.0.1:2301".to_string(),
+                        }),
+                        r#type: replica_id::ReplicaType::Voter as i32,
+                    },
+                    ReplicaId {
+                        partition_key: Some(RaftPartitionKey {
+                            value: "partition-a".to_string(),
+                        }),
+                        member_id: 2,
+                        storage_name: "secondary".to_string(),
+                        metadata: Some(replica_id::Metadata {
+                            address: "127.0.0.1:2302".to_string(),
+                        }),
+                        r#type: replica_id::ReplicaType::Learner as i32,
+                    },
+                ],
+            })
+            .await
+            .expect("join_cluster should succeed");
 
         let mut partitions_stream = client
             .get_partitions(GetPartitionsRequest {
@@ -275,6 +371,7 @@ mod tests {
                     value: "partition-a".to_string(),
                 }),
                 relative_path: "group/project.git".to_string(),
+                include_replica_details: true,
                 include_relative_paths: true,
                 ..GetPartitionsRequest::default()
             })
@@ -287,43 +384,14 @@ mod tests {
             .expect("partition response should exist")
             .expect("partition response should succeed");
         assert_eq!(first.cluster_id, "cluster-a");
+        assert_eq!(first.leader_id, 1);
+        assert_eq!(first.term, 5);
+        assert_eq!(first.index, 20);
+        assert_eq!(first.replicas.len(), 2);
         assert_eq!(first.relative_paths, vec!["group/project.git".to_string()]);
 
         let end = partitions_stream.next().await;
         assert!(end.is_none());
-
-        shutdown_server(shutdown_tx, server_task).await;
-    }
-
-    #[tokio::test]
-    async fn join_cluster_and_cluster_info_validate_inputs() {
-        let (endpoint, shutdown_tx, server_task) =
-            start_server(RaftServiceImpl::new(test_dependencies())).await;
-        let mut client = connect_client(endpoint).await;
-
-        client
-            .join_cluster(JoinClusterRequest {
-                partition_key: Some(RaftPartitionKey {
-                    value: "partition-a".to_string(),
-                }),
-                leader_id: 1,
-                member_id: 2,
-                storage_name: "default".to_string(),
-                relative_path: "partitions/p1".to_string(),
-                replicas: vec![ReplicaId {
-                    partition_key: Some(RaftPartitionKey {
-                        value: "partition-a".to_string(),
-                    }),
-                    member_id: 2,
-                    storage_name: "default".to_string(),
-                    metadata: Some(replica_id::Metadata {
-                        address: "127.0.0.1:2305".to_string(),
-                    }),
-                    r#type: 0,
-                }],
-            })
-            .await
-            .expect("join_cluster should succeed");
 
         let cluster_info = client
             .get_cluster_info(RaftClusterInfoRequest {
@@ -333,7 +401,29 @@ mod tests {
             .expect("get_cluster_info should succeed")
             .into_inner();
         assert_eq!(cluster_info.cluster_id, "cluster-a");
-        assert!(cluster_info.statistics.is_some());
+        let statistics = cluster_info
+            .statistics
+            .expect("statistics should be available");
+        assert_eq!(statistics.total_partitions, 1);
+        assert_eq!(statistics.healthy_partitions, 1);
+        assert_eq!(statistics.total_replicas, 2);
+        assert_eq!(statistics.healthy_replicas, 2);
+        assert_eq!(
+            statistics
+                .storage_stats
+                .get("default")
+                .expect("default storage stats should exist")
+                .leader_count,
+            1
+        );
+        assert_eq!(
+            statistics
+                .storage_stats
+                .get("secondary")
+                .expect("secondary storage stats should exist")
+                .replica_count,
+            1
+        );
 
         shutdown_server(shutdown_tx, server_task).await;
     }

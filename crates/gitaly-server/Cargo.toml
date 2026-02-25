@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 gitaly-cgroups = { path = "../gitaly-cgroups" }
+gitaly-cluster = { path = "../gitaly-cluster" }
 gitaly-config = { path = "../gitaly-config" }
 gitaly-git = { path = "../gitaly-git" }
 gitaly-limiter = { path = "../gitaly-limiter" }

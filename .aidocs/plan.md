@@ -1,6 +1,6 @@
 # gitaly-rs Execution Plan (Active)
 
-Last updated: 2026-02-24
+Last updated: 2026-02-25
 
 ## Working Routine
 
@@ -20,8 +20,8 @@ Last updated: 2026-02-24
 - Phase 6: done
 - Phase 7: mostly done
 - Phase 8: partial (many RPC/tooling gaps)
-- Phase 9: not started
-- Phase 10: not started (planned root test hierarchy missing)
+- Phase 9: partial (cluster state baseline and raft wiring implemented; full consensus engine still pending)
+- Phase 10: partial (root test hierarchy baseline implemented; broader suites pending)
 
 ## Task Queue
 
@@ -47,16 +47,15 @@ Last updated: 2026-02-24
 | T04b2 | Implement repository maintenance and bundle RPC slices | `service/repository.rs` | done | Closed all remaining repository RPC stubs with conservative baseline behavior and tests |
 | T05 | Add missing binaries and packaging path | `bins/*`, workspace wiring | done | Added helper binaries and staging script for a shared install destination |
 | T06 | Build root integration/chaos/stress test layout | `tests/*`, `benches/*` | done | Added root support harness, integration/chaos suites, and first stress bench target |
-| T07 | Introduce `gitaly-cluster` and real raft integration | `crates/gitaly-cluster`, `service/raft.rs` | in_progress | Move from placeholder service to `openraft`-backed cluster state |
+| T07 | Introduce `gitaly-cluster` and real raft integration | `crates/gitaly-cluster`, `service/raft.rs` | done | Added `gitaly-cluster` state manager and wired `RaftService` to cluster-derived partition/statistics responses |
 
 ## Current Task Detail
 
-### T07 - Introduce `gitaly-cluster` and real raft integration
+### Queue Status
 
 Subtasks:
-- Create `crates/gitaly-cluster` with baseline cluster state and message handling.
-- Wire `RaftServiceImpl` to delegate to cluster state instead of returning placeholders.
-- Add focused raft service/cluster tests for join, message, and metadata flow.
+- All queued tasks (`T00` through `T07`) are complete.
+- Next work should be added as new task IDs before implementation starts.
 
 Verification target:
 - `cargo test -p gitaly-cluster`
@@ -86,3 +85,4 @@ Verification target:
 - 2026-02-25: Marked T05 complete and started T06 root test hierarchy work.
 - 2026-02-25: Completed T06 by adding root `tests/support` harness, `integration_server_info`, `chaos_stream_shutdown`, and `stress_repository_exists` bench target.
 - 2026-02-25: Marked T06 complete and started T07 cluster/raft integration work.
+- 2026-02-25: Completed T07 by adding `crates/gitaly-cluster`, wiring `RaftService` to shared cluster state, and adding focused cluster/raft tests.

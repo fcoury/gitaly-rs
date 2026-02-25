@@ -13,6 +13,7 @@ members = [
   "crates/gitaly-storage",
   "crates/gitaly-limiter",
   "crates/gitaly-cgroups",
+  "crates/gitaly-cluster",
   "crates/gitaly-auth",
   "crates/gitaly-config",
   "crates/gitaly-error",
@@ -48,6 +49,7 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 russh = "0.57"
+openraft = "0.9.21"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

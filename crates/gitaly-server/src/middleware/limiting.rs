@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use gitaly_cgroups::CommandIdentity;
 use gitaly_limiter::concurrency::{AcquireError, ConcurrencyGuard};
 use tonic::{Request, Status};
+use tracing::{info, warn};
 
 use super::MiddlewareContext;
 
@@ -35,10 +36,38 @@ pub(crate) fn apply(
 ) -> Result<Request<()>, Status> {
     let mut request = super::mark_step(request, "limiting")?;
     let limiter_key = limiter_key(&request);
-    let guard = context
-        .limiter()
-        .try_acquire(limiter_key.clone())
-        .map_err(acquire_error_to_status)?;
+    let observability_fields = super::observability_fields(&request);
+    let guard = match context.limiter().try_acquire(limiter_key.clone()) {
+        Ok(guard) => guard,
+        Err(error) => {
+            let rejection_count = super::metrics::record_rejection(
+                "limiter.resource_exhausted",
+                &observability_fields.full_method,
+            );
+            warn!(
+                correlation_id = %observability_fields.correlation_id,
+                grpc.service = %observability_fields.service,
+                grpc.method = %observability_fields.method,
+                grpc.full_method = %observability_fields.full_method,
+                limiter.key = %limiter_key,
+                limiter.decision = "rejected",
+                limiter.reason = "limiter.resource_exhausted",
+                metrics.rejection_count = rejection_count,
+                error = %error,
+                "request rejected by limiter middleware"
+            );
+            return Err(acquire_error_to_status(error));
+        }
+    };
+    info!(
+        correlation_id = %observability_fields.correlation_id,
+        grpc.service = %observability_fields.service,
+        grpc.method = %observability_fields.method,
+        grpc.full_method = %observability_fields.full_method,
+        limiter.key = %limiter_key,
+        limiter.decision = "acquired",
+        "limiter middleware decision"
+    );
 
     request
         .extensions_mut()
@@ -97,6 +126,8 @@ mod tests {
     use tonic::Code;
 
     use super::*;
+    use crate::middleware::metrics::{rejection_count_for_test, reset_rejection_counts_for_test};
+    use crate::middleware::request_info::RequestInfo;
 
     struct RecordingCgroupManager {
         assigned: Mutex<Vec<CommandIdentity>>,
@@ -145,12 +176,18 @@ mod tests {
 
     #[test]
     fn apply_returns_resource_exhausted_when_limiter_is_exhausted() {
+        reset_rejection_counts_for_test();
         let limiter = ConcurrencyLimiter::new(1, 0);
         let _held = limiter
             .try_acquire("repo-1")
             .expect("first acquire should succeed");
         let context = MiddlewareContext::new(limiter);
         let mut request = Request::new(());
+        request.extensions_mut().insert(RequestInfo {
+            service: "gitaly.RepositoryService".to_string(),
+            method: "RepositoryExists".to_string(),
+            full_method: "/gitaly.RepositoryService/RepositoryExists".to_string(),
+        });
         request.metadata_mut().insert(
             REPOSITORY_METADATA_KEY,
             "repo-1".parse().expect("metadata should parse"),
@@ -159,6 +196,13 @@ mod tests {
         let status = apply(request, &context).expect_err("second acquire should be rejected");
 
         assert_eq!(status.code(), Code::ResourceExhausted);
+        assert_eq!(
+            rejection_count_for_test(
+                "limiter.resource_exhausted",
+                "/gitaly.RepositoryService/RepositoryExists"
+            ),
+            1
+        );
     }
 
     #[test]

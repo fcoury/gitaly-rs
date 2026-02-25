@@ -12,6 +12,7 @@ pub(crate) struct RequestMetricSnapshot {
 }
 
 static REQUEST_COUNTS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+static REJECTION_COUNTS: OnceLock<Mutex<HashMap<(String, String), u64>>> = OnceLock::new();
 
 pub(crate) fn apply(mut request: Request<()>) -> Result<Request<()>, Status> {
     let full_method = request
@@ -29,6 +30,17 @@ pub(crate) fn apply(mut request: Request<()>) -> Result<Request<()>, Status> {
     super::mark_step(request, "metrics")
 }
 
+pub(crate) fn record_rejection(reason: &str, full_method: &str) -> u64 {
+    let mut counts = rejection_counts()
+        .lock()
+        .expect("rejection counters mutex should not be poisoned");
+    let entry = counts
+        .entry((reason.to_string(), full_method.to_string()))
+        .or_insert(0);
+    *entry += 1;
+    *entry
+}
+
 fn increment_count(full_method: &str) -> u64 {
     let mut counts = request_counts()
         .lock()
@@ -40,6 +52,10 @@ fn increment_count(full_method: &str) -> u64 {
 
 fn request_counts() -> &'static Mutex<HashMap<String, u64>> {
     REQUEST_COUNTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn rejection_counts() -> &'static Mutex<HashMap<(String, String), u64>> {
+    REJECTION_COUNTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[cfg(test)]
@@ -61,10 +77,31 @@ pub(crate) fn reset_counts_for_test() {
 }
 
 #[cfg(test)]
+pub(crate) fn rejection_count_for_test(reason: &str, full_method: &str) -> u64 {
+    rejection_counts()
+        .lock()
+        .expect("rejection counters mutex should not be poisoned")
+        .get(&(reason.to_string(), full_method.to_string()))
+        .copied()
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_rejection_counts_for_test() {
+    rejection_counts()
+        .lock()
+        .expect("rejection counters mutex should not be poisoned")
+        .clear();
+}
+
+#[cfg(test)]
 mod tests {
     use tonic::Request;
 
-    use super::{apply, count_for_method, reset_counts_for_test, RequestMetricSnapshot};
+    use super::{
+        apply, count_for_method, record_rejection, rejection_count_for_test, reset_counts_for_test,
+        reset_rejection_counts_for_test, RequestMetricSnapshot,
+    };
     use crate::middleware::request_info::RequestInfo;
 
     #[test]
@@ -104,5 +141,16 @@ mod tests {
                 total_seen: 2,
             })
         );
+    }
+
+    #[test]
+    fn record_rejection_increments_per_reason_and_method() {
+        reset_rejection_counts_for_test();
+        let method = "/gitaly.RepositoryService/RepositoryExists";
+        let reason = "auth.unauthenticated";
+
+        assert_eq!(record_rejection(reason, method), 1);
+        assert_eq!(record_rejection(reason, method), 2);
+        assert_eq!(rejection_count_for_test(reason, method), 2);
     }
 }

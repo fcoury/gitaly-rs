@@ -24,24 +24,24 @@ Last updated: 2026-02-25
 | ID | Task | Scope | Status | Notes |
 |---|---|---|---|---|
 | T08 | Close remaining Phase 8 API/tooling gaps | `service/*`, `bins/*`, tooling | done | Closed highest-impact gaps: helper binaries now functional and repository backup/restore RPCs implement real snapshot semantics |
-| T09 | Complete Phase 5 observability rollout | middleware + service surfaces | in_progress | Structured logs, metrics, and correlation propagation across all major RPC paths |
-| T10 | Execute Phase 3 durability drills | write path + storage durability | pending | Crash/restart drills, fsync/atomicity checks, snapshot/restore corruption handling |
+| T09 | Complete Phase 5 observability rollout | middleware + service surfaces | done | Structured logs, metrics, and correlation propagation now cover middleware accept/reject paths with per-reason counters |
+| T10 | Execute Phase 3 durability drills | write path + storage durability | in_progress | Crash/restart drills, fsync/atomicity checks, snapshot/restore corruption handling |
 | T11 | Run Phase 4 load/stress gate | load harness + stress profiles | pending | Saturation/soak tests with explicit pass/fail SLO thresholds |
 | T12 | Deepen Phase 9 cluster implementation | `gitaly-cluster`, `service/raft.rs` | pending | Move from baseline state manager to deeper OpenRaft lifecycle and persistence |
 | T13 | Expand Phase 10 test program | `tests/*`, CI matrix, coverage | pending | Grow integration/chaos/compat/reliability suites and nightly matrix |
 
 ## Current Task Detail
 
-### T09 - Complete Phase 5 observability rollout
+### T10 - Execute Phase 3 durability drills
 
 Subtasks:
-- Extend structured logs coverage for major service paths and error surfaces.
-- Add/normalize request metrics labels and latency/error coverage for key RPC families.
-- Ensure correlation/request context is consistently emitted across request lifecycle logs.
+- Add crash/restart durability drills for write-heavy repository flows.
+- Validate atomic snapshot/restore behavior under partial or corrupted backup inputs.
+- Verify WAL/commit ordering recovery behavior after interrupted write sequences.
 
 Verification target:
+- Focused storage + repository durability tests.
 - `cargo test --workspace -- --test-threads=1`
-- Focused middleware + service tests covering logging/metrics fields.
 
 ## Changelog
 
@@ -49,3 +49,6 @@ Verification target:
 - 2026-02-25: Created new active plan covering remaining areas (T08-T13).
 - 2026-02-25: Completed T08 gap-closure slice by replacing helper binary placeholders with functional baseline CLIs (`gitaly-hooks`, `gitaly-ssh`, `gitaly-backup`, `gitaly-gpg`, `gitaly-lfs-smudge`, `gitaly-blackbox`) and implementing snapshot-based `backup_repository`/`restore_repository` semantics in `RepositoryService`.
 - 2026-02-25: Marked T08 complete and started T09 observability rollout.
+- 2026-02-25: Completed T09 by adding shared observability field extraction, structured auth/limiter decision logging, and per-reason rejection counters wired into middleware tests.
+- 2026-02-25: Verified T09 with `cargo test -p gitaly-server --lib middleware:: -- --test-threads=1` and `cargo test --workspace -- --test-threads=1`.
+- 2026-02-25: Marked T09 complete and started T10 durability drill execution.

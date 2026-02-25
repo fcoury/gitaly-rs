@@ -1,4 +1,5 @@
 use tonic::{Request, Status};
+use tracing::{info, warn};
 
 use super::MiddlewareContext;
 
@@ -18,6 +19,15 @@ pub(crate) fn apply(
 ) -> Result<Request<()>, Status> {
     let Some(expected_token) = context.auth_token() else {
         request.extensions_mut().insert(AuthDecision::Disabled);
+        let fields = super::observability_fields(&request);
+        info!(
+            correlation_id = %fields.correlation_id,
+            grpc.service = %fields.service,
+            grpc.method = %fields.method,
+            grpc.full_method = %fields.full_method,
+            auth.decision = "disabled",
+            "auth middleware decision"
+        );
         return super::mark_step(request, "auth");
     };
 
@@ -32,12 +42,39 @@ pub(crate) fn apply(
     } else if context.allow_unauthenticated() {
         AuthDecision::TransitionAllowed
     } else {
+        let fields = super::observability_fields(&request);
+        let rejection_count =
+            super::metrics::record_rejection("auth.unauthenticated", &fields.full_method);
+        warn!(
+            correlation_id = %fields.correlation_id,
+            grpc.service = %fields.service,
+            grpc.method = %fields.method,
+            grpc.full_method = %fields.full_method,
+            auth.decision = "rejected",
+            auth.reason = "auth.unauthenticated",
+            metrics.rejection_count = rejection_count,
+            "request rejected by auth middleware"
+        );
         return Err(Status::unauthenticated(
             "missing or invalid `authorization` token",
         ));
     };
 
+    let decision_label = match &decision {
+        AuthDecision::Disabled => "disabled",
+        AuthDecision::Authenticated => "authenticated",
+        AuthDecision::TransitionAllowed => "transition_allowed",
+    };
     request.extensions_mut().insert(decision);
+    let fields = super::observability_fields(&request);
+    info!(
+        correlation_id = %fields.correlation_id,
+        grpc.service = %fields.service,
+        grpc.method = %fields.method,
+        grpc.full_method = %fields.full_method,
+        auth.decision = decision_label,
+        "auth middleware decision"
+    );
     super::mark_step(request, "auth")
 }
 
@@ -48,6 +85,8 @@ mod tests {
     use gitaly_limiter::concurrency::ConcurrencyLimiter;
 
     use super::{apply, AuthDecision};
+    use crate::middleware::metrics::{rejection_count_for_test, reset_rejection_counts_for_test};
+    use crate::middleware::request_info::RequestInfo;
     use crate::middleware::MiddlewareContext;
 
     #[test]
@@ -71,12 +110,25 @@ mod tests {
 
     #[test]
     fn apply_rejects_missing_token_when_transition_is_disabled() {
+        reset_rejection_counts_for_test();
         let context = MiddlewareContext::new(ConcurrencyLimiter::new(1, 0))
             .with_auth_token("secret-token", false);
-        let request = Request::new(());
+        let mut request = Request::new(());
+        request.extensions_mut().insert(RequestInfo {
+            service: "gitaly.RepositoryService".to_string(),
+            method: "RepositoryExists".to_string(),
+            full_method: "/gitaly.RepositoryService/RepositoryExists".to_string(),
+        });
 
         let error = apply(request, &context).expect_err("auth should fail");
         assert_eq!(error.code(), Code::Unauthenticated);
+        assert_eq!(
+            rejection_count_for_test(
+                "auth.unauthenticated",
+                "/gitaly.RepositoryService/RepositoryExists"
+            ),
+            1
+        );
     }
 
     #[test]

@@ -114,6 +114,39 @@ pub struct MiddlewareTrace {
     pub steps: Vec<&'static str>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ObservabilityFields {
+    pub(crate) correlation_id: String,
+    pub(crate) service: String,
+    pub(crate) method: String,
+    pub(crate) full_method: String,
+}
+
+pub(crate) fn observability_fields(request: &Request<()>) -> ObservabilityFields {
+    let correlation_id = request
+        .extensions()
+        .get::<correlation_id::CorrelationId>()
+        .map(|correlation_id| correlation_id.0.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let request_info = request
+        .extensions()
+        .get::<request_info::RequestInfo>()
+        .cloned()
+        .unwrap_or(request_info::RequestInfo {
+            service: "unknown".to_string(),
+            method: "unknown".to_string(),
+            full_method: "/unknown/unknown".to_string(),
+        });
+
+    ObservabilityFields {
+        correlation_id,
+        service: request_info.service,
+        method: request_info.method,
+        full_method: request_info.full_method,
+    }
+}
+
 #[must_use]
 pub fn ordered_interceptor() -> impl FnMut(Request<()>) -> Result<Request<()>, Status> + Clone {
     ordered_interceptor_with_context(Arc::new(MiddlewareContext::default()))
@@ -165,7 +198,10 @@ mod tests {
 
     use gitaly_cgroups::CgroupConfig;
 
-    use super::{limiting, ordered_interceptor, run_chain, MiddlewareContext, MiddlewareTrace};
+    use super::{
+        correlation_id, limiting, observability_fields, ordered_interceptor, request_info,
+        run_chain, MiddlewareContext, MiddlewareTrace, ObservabilityFields,
+    };
 
     const ORDERED_STEPS: [&str; 12] = [
         "correlation_id",
@@ -240,6 +276,44 @@ mod tests {
         let error = run_chain(Request::new(()), &context).expect_err("request should be rejected");
 
         assert_eq!(error.code(), Code::Unauthenticated);
+    }
+
+    #[test]
+    fn observability_fields_fall_back_to_unknown_values_when_extensions_missing() {
+        let request = Request::new(());
+
+        assert_eq!(
+            observability_fields(&request),
+            ObservabilityFields {
+                correlation_id: "unknown".to_string(),
+                service: "unknown".to_string(),
+                method: "unknown".to_string(),
+                full_method: "/unknown/unknown".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn observability_fields_use_existing_extensions_when_available() {
+        let mut request = Request::new(());
+        request
+            .extensions_mut()
+            .insert(correlation_id::CorrelationId("corr-1".to_string()));
+        request.extensions_mut().insert(request_info::RequestInfo {
+            service: "gitaly.RepositoryService".to_string(),
+            method: "RepositoryExists".to_string(),
+            full_method: "/gitaly.RepositoryService/RepositoryExists".to_string(),
+        });
+
+        assert_eq!(
+            observability_fields(&request),
+            ObservabilityFields {
+                correlation_id: "corr-1".to_string(),
+                service: "gitaly.RepositoryService".to_string(),
+                method: "RepositoryExists".to_string(),
+                full_method: "/gitaly.RepositoryService/RepositoryExists".to_string(),
+            }
+        );
     }
 
     fn trace_steps(request: &Request<()>) -> Vec<&'static str> {

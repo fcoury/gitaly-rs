@@ -1,0 +1,173 @@
+syntax = "proto3";
+
+package gitaly;
+
+import "lint.proto";
+import "shared.proto";
+
+option go_package = "gitlab.com/gitlab-org/gitaly/v18/proto/go/gitalypb";
+
+// ObjectPoolService is a service that manages the lifetime of object pools.
+//
+// An object pool is a separate repository that can be linked to from multiple object pool members
+// in order to deduplicate common objects between them. This is mostly used in the context of
+// repository forks.
+//
+// The typical lifetime of an object pool is as follows:
+//
+// 1. An object pool is created via CreateObjectPool from its primary pool member. Typically this
+//    would be the repository that gets forked.
+// 2. One or more repositories are linked to the object pool via LinkRepositoryToObjectPool. Each
+//    object pool member linked to the repository will have its objects deduplicated when its
+//    objects get repacked the next time.
+// 3. The object pool is regularly updated via FetchIntoObjectPool. This is typically only done from
+//    the primary object pool member.
+// 4. Repositories may leave the object pool via DisconnectGitAlternates. There is not much of a
+//    reason to do this for any repositories except for the primary object pool member in case it
+//    for example becomes private.
+// 5. When the object pool does not have any members anymore it gets deleted via DeleteObjectPool.
+//    It is the responsibility of the caller to ensure that it really has no members left, else
+//    any existing member will become corrupt.
+service ObjectPoolService {
+
+  // CreateObjectPool creates an object pool from a specific source repository. It will create the
+  // object pool by cloning all contents from that source repository. The source repository will not
+  // automatically be linked to the object pool, you need to call LinkRepositoryToObjectPool for
+  // this. If the object pool exists already this RPC returns an error with the FailedPrecondition
+  // gRPC error code.
+  rpc CreateObjectPool(CreateObjectPoolRequest) returns (CreateObjectPoolResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // DeleteObjectPool deletes the object pool. There are no safety checks in place, so if any
+  // repository is still using this object pool it will become corrupted.
+  rpc DeleteObjectPool(DeleteObjectPoolRequest) returns (DeleteObjectPoolResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // LinkRepositoryToObjectPool links the specified repository to the object pool. Objects contained
+  // in the object pool will be deduplicated for this repository when repacking objects.
+  rpc LinkRepositoryToObjectPool(LinkRepositoryToObjectPoolRequest) returns (LinkRepositoryToObjectPoolResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // DisconnectGitAlternates will disconnect the object pool member from its object pool. It will:
+  //
+  // 1. Link all objects from the object pool into the member repository. This essenitally
+  //    reduplicates previously-duplicated objects so that the repository will continue to function
+  //    after being unlinked.
+  // 2. Remove the alternates link to the object pool.
+  // 3. Perform a consistency check to assert that the repository is indeed fully functional after
+  //    unlinking it from its pool. If the consistency check fails the alternates link is restored
+  //    an the RPC fails.
+  //
+  // If successful, the object pool member is disconnected from the object pool and does not depend
+  // on it anymore.
+  //
+  // This RPC does not return an error in case the repository is not linked to any object pool.
+  rpc DisconnectGitAlternates(DisconnectGitAlternatesRequest) returns (DisconnectGitAlternatesResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // FetchIntoObjectPool fetches all references from a pool member into an object pool so that
+  // objects shared between this repository and other pool members can be deduplicated. This RPC
+  // will perform housekeeping tasks after the object pool has been updated to ensure that the pool
+  // is in an optimal state.
+  rpc FetchIntoObjectPool(FetchIntoObjectPoolRequest) returns (FetchIntoObjectPoolResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // GetObjectPool returns the object pool a repository is connected to. If the repository is not
+  // connected to a pool then this RPC returns successfully with an empty response.
+  rpc GetObjectPool(GetObjectPoolRequest) returns (GetObjectPoolResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+}
+
+// CreateObjectPoolRequest is a request for the CreateObjectPool RPC.
+message CreateObjectPoolRequest {
+  // object_pool is the object pool to create. This field controls where exactly the object pool will
+  // be created.
+  ObjectPool object_pool = 1 [(target_repository)=true];
+  // origin is the repository from which the object pool shall be created.
+  Repository origin = 2 [(additional_repository)=true];
+}
+
+// CreateObjectPoolResponse is a response for the CreateObjectPool RPC.
+message CreateObjectPoolResponse {
+}
+
+// DeleteObjectPoolRequest is a request for the DeleteObjectPool RPC.
+message DeleteObjectPoolRequest {
+  // object_pool is the object pool that shall be deleted.
+  ObjectPool object_pool = 1 [(target_repository)=true];
+}
+
+// DeleteObjectPoolResponse is a response for the DeleteObjectPool RPC.
+message DeleteObjectPoolResponse {
+}
+
+// LinkRepositoryToObjectPoolRequest is a request for the LinkRepositoryToObjectPool RPC.
+message LinkRepositoryToObjectPoolRequest {
+  // object_pool is the object pool to which the repository shall be linked to.
+  ObjectPool object_pool = 1 [(additional_repository)=true];
+  // repository is the repository that shall be linked to the object pool.
+  Repository repository = 2 [(target_repository)=true];
+}
+
+// LinkRepositoryToObjectPoolResponse is a response for the LinkRepositoryToObjectPool RPC.
+message LinkRepositoryToObjectPoolResponse {
+}
+
+// DisconnectGitAlternatesRequest is a request for the DisconnectGitAlternates RPC.
+message DisconnectGitAlternatesRequest {
+  // repository is th repository that shall be disconnected from its object pool.
+  Repository repository = 1  [(target_repository)=true];
+}
+
+// DisconnectGitAlternatesResponse is a response for the DisconnectGitAlternates RPC.
+message DisconnectGitAlternatesResponse {
+}
+
+// FetchIntoObjectPoolRequest is a request for the FetchIntoObjectPool RPC.
+message FetchIntoObjectPoolRequest {
+  // origin is the repository to fetch changes from.
+  Repository origin = 1 [(additional_repository)=true];
+  // object_pool is the repository to fetch changes into.
+  ObjectPool object_pool = 2 [(target_repository)=true];
+
+  // Repack had the intent to control whether FetchIntoObjectPool would perform housekeeping tasks
+  // in the pool repository or not. This flag wasn't ever honored though and is thus doing nothing.
+  reserved 3;
+  reserved "repack";
+}
+
+// FetchIntoObjectPoolResponse is a response for the FetchIntoObjectPool RPC.
+message FetchIntoObjectPoolResponse {
+}
+
+// GetObjectPoolRequest is a request for the GetObjectPool RPC.
+message GetObjectPoolRequest {
+  // repository is the repository for which the object pool shall be retrieved.
+  Repository repository = 1 [(target_repository)=true];
+}
+
+// GetObjectPoolResponse is a response for the GetObjectPool RPC.
+message GetObjectPoolResponse {
+  // object_pool is the object pool the repository is connected to. If the repository is not
+  // connected to any object pool, then this field will be empty.
+  ObjectPool object_pool = 1;
+}

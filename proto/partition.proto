@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package gitaly;
+
+import "lint.proto";
+import "shared.proto";
+
+option go_package = "gitlab.com/gitlab-org/gitaly/v18/proto/go/gitalypb";
+
+// PartitionService is a service providing RPCs accessing partitions as a whole.
+service PartitionService {
+
+  // BackupPartition backs up an entire partition and saves it to
+  // the configured backup sink (filesystem or object storage).
+  rpc BackupPartition(BackupPartitionRequest) returns (BackupPartitionResponse) {
+    option (op_type) = {
+      op:          ACCESSOR
+      scope_level: PARTITION
+    };
+  }
+
+  // ListPartitions lists partitions present in the storage.
+  rpc ListPartitions(ListPartitionsRequest) returns (ListPartitionsResponse) {
+    option (op_type) = {
+      op:          ACCESSOR
+      scope_level: STORAGE
+    };
+  }
+
+}
+
+// BackupPartitionRequest is a request for the BackupPartition RPC.
+message BackupPartitionRequest {
+  // storage_name is the name of the storage containing the partition to be backed up.
+  string storage_name = 1 [(gitaly.storage)=true];
+  // partition_id is the identifier of the specific partition within the storage to
+  // be backed up, which may contain one or more repositories and associated data.
+  string partition_id = 2 [(gitaly.partition_id)=true];
+}
+
+// BackupPartitionResponse is a response for the BackupPartition RPC.
+message BackupPartitionResponse {
+}
+
+// ListPartitionsRequest is a request for the ListPartitions RPC.
+message ListPartitionsRequest {
+  // storage_name is the name of the storage in which partitions will be searched for.
+  string storage_name = 1 [(gitaly.storage)=true];
+
+  // pagination_params controls paging. Refer to PaginationParameter documentation for
+  // further info.
+  PaginationParameter pagination_params = 2;
+}
+
+// ListPartitionsResponse is a response for the ListPartitions RPC.
+message ListPartitionsResponse {
+  // partitions is the list of partitions found.
+  repeated Partition partitions = 1;
+  // pagination_cursor contains the page token to fetch the next page of results. Refer to PaginationCursor
+  // documentation for further info.
+  PaginationCursor pagination_cursor = 2;
+}
+
+// KVPair represents single key-value pair.
+message KVPair {
+  // key is the key of the key-value pair.
+  bytes key = 1;
+  // value is the value of the key-value pair.
+  bytes value = 2;
+}

@@ -1,0 +1,600 @@
+syntax = "proto3";
+
+package gitaly;
+
+import "errors.proto";
+import "lint.proto";
+import "shared.proto";
+
+option go_package = "gitlab.com/gitlab-org/gitaly/v18/proto/go/gitalypb";
+
+// RefService is a service that provides RPCs to list and modify Git references.
+service RefService {
+
+  // FindDefaultBranchName looks up the default branch reference name. Unless
+  // otherwise specified the following heuristic is used:
+  //
+  // 1. If there are no branches, return an empty string.
+  // 2. If there is only one branch, return the only branch.
+  // 3. If a branch exists that matches HEAD, return the HEAD reference name.
+  // 4. If a branch exists named refs/heads/main, return refs/heads/main.
+  // 5. If a branch exists named refs/heads/master, return refs/heads/master.
+  // 6. Return the first branch (as per default ordering by git).
+  rpc FindDefaultBranchName(FindDefaultBranchNameRequest) returns (FindDefaultBranchNameResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // FindLocalBranches finds all the local branches under `refs/heads/` for the specified repository.
+  // The response is streamed back to the client to divide the list of branches into chunks.
+  rpc FindLocalBranches(FindLocalBranchesRequest) returns (stream FindLocalBranchesResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // FindAllBranches finds all branches under `refs/heads/` and `refs/remotes/` for the specified repository.
+  // The response is streamed back to the client to divide the list of branches into chunks.
+  rpc FindAllBranches(FindAllBranchesRequest) returns (stream FindAllBranchesResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // FindAllTags finds all tags under `refs/tags/` for the specified repository.
+  // The response is streamed back to the client to divide the list of tags into chunks.
+  rpc FindAllTags(FindAllTagsRequest) returns (stream FindAllTagsResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // FindTag looks up a tag by its name and returns it to the caller if it exists. This RPC supports
+  // both lightweight and annotated tags. Note: this RPC returns an `Internal` error if the tag was
+  // not found.
+  rpc FindTag(FindTagRequest) returns (FindTagResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // FindAllRemoteBranches finds all the remote branches under `refs/remotes/` for the specified repository.
+  // The response is streamed back to the client to divide the list of branches into chunks.
+  rpc FindAllRemoteBranches(FindAllRemoteBranchesRequest) returns (stream FindAllRemoteBranchesResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // RefExists checks if the specified reference exists. The reference must be fully qualified.
+  rpc RefExists(RefExistsRequest) returns (RefExistsResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // FindBranch finds a branch by its unqualified name (like "master") and
+  // returns the commit it currently points to.
+  rpc FindBranch(FindBranchRequest) returns (FindBranchResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // UpdateReferences atomically updates a set of references to a new state. This RPC allows creating
+  // new references, deleting old references and updating existing references in a raceless way.
+  //
+  // Updating symbolic references with this RPC is not allowed.
+  rpc UpdateReferences(stream UpdateReferencesRequest) returns (UpdateReferencesResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // DeleteRefs deletes the specified references from its repository. Attempting to delete an
+  // non-existent reference does not result in an error. It is recommended to instead use the
+  // UpdateReferences RPC because it can delete references in a raceless manner via the expected old
+  // object ID.
+  rpc DeleteRefs(DeleteRefsRequest) returns (DeleteRefsResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // ListBranchNamesContainingCommit finds all branches under `refs/heads/` that contain the specified commit.
+  // The response is streamed back to the client to divide the list of branches into chunks.
+  rpc ListBranchNamesContainingCommit(ListBranchNamesContainingCommitRequest) returns (stream ListBranchNamesContainingCommitResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // ListTagNamesContainingCommit finds all tags under `refs/tags/` that contain the specified commit.
+  // The response is streamed back to the client to divide the list of tags into chunks.
+  rpc ListTagNamesContainingCommit(ListTagNamesContainingCommitRequest) returns (stream ListTagNamesContainingCommitResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // GetTagSignatures returns signatures for annotated tags resolved from a set of revisions. Revisions
+  // which don't resolve to an annotated tag are silently discarded. Revisions which cannot be resolved
+  // result in an error. Tags which are annotated but not signed will return a TagSignature response
+  // which has no signature, but its unsigned contents will still be returned.
+  rpc GetTagSignatures(GetTagSignaturesRequest) returns (stream GetTagSignaturesResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // GetTagMessages returns tag messages for the annotated tags identified via the given revisions.
+  // The response is streamed back to the client with a response message containing the tag ID
+  // always preceding one or more messages containing the tag message contents. This is repeated for
+  // all tags in the response.
+  rpc GetTagMessages(GetTagMessagesRequest) returns (stream GetTagMessagesResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // ListRefs returns a stream of all references in the repository. By default, pseudo-revisions like HEAD
+  // will not be returned by this RPC. Any symbolic references will be resolved to the object ID it is
+  // pointing at.
+  rpc ListRefs(ListRefsRequest) returns (stream ListRefsResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // FindRefsByOID returns an array of fully qualified reference names that point to an object ID.
+  // It returns nothing if the object ID doesn't exist, or doesn't point to
+  // any branches or tags. Prefixes can be also be used as the object ID.
+  rpc FindRefsByOID(FindRefsByOIDRequest) returns (FindRefsByOIDResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+}
+
+// FindDefaultBranchNameRequest is a request for the FindDefaultBranchName RPC.
+message FindDefaultBranchNameRequest {
+  // repository is the repository to find the default branch from.
+  Repository repository = 1 [(target_repository)=true];
+  // head_only when true will determine the default branch using HEAD only
+  // instead of using the heuristic. The returned reference may not exist.
+  bool head_only = 2;
+}
+
+// FindDefaultBranchNameResponse is a response for the FindDefaultBranchName RPC.
+message FindDefaultBranchNameResponse {
+  // name is the fully qualified default branch name.
+  bytes name = 1;
+}
+
+// FindLocalBranchesRequest is a request for the FindLocalBranches RPC.
+message FindLocalBranchesRequest {
+  // SortBy defines the allowed field names which references can be sorted by.
+  // https://git-scm.com/docs/git-for-each-ref#Documentation/git-for-each-ref.txt---sortltkeygt
+  enum SortBy {
+    // NAME is for the `--sort=refname` option and is the default option.
+    NAME = 0; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX ENUM_FIELD_NAMES_ZERO_VALUE_END_WITH
+    // UPDATED_ASC is for the `--sort=committerdate` option.
+    UPDATED_ASC = 1; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+    // UPDATED_DESC is for the `--sort=-committerdate` option.
+    UPDATED_DESC = 2; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+  }
+
+  // repository is the repository to find the branch in.
+  Repository repository = 1 [(target_repository)=true];
+  // sort_by sets which field the returned branches are sorted by.
+  SortBy sort_by = 2;
+  // pagination_params controls paging. Refer to PaginationParameter documentation for
+  // further info.
+  PaginationParameter pagination_params = 3;
+}
+
+// FindLocalBranchesResponse is a response for the FindLocalBranches RPC.
+message FindLocalBranchesResponse {
+  // The field Branches has been removed in favor of LocalBranches.
+  // Issue: https://gitlab.com/gitlab-org/gitaly/-/issues/1294
+  reserved "branches";
+  reserved 1;
+  // local_branches is a list of local branches found in the repository.
+  repeated Branch local_branches = 2;
+}
+
+// FindAllBranchesRequest is a request for the FindAllBranches RPC.
+message FindAllBranchesRequest {
+  // repository is the repository to find the branch in.
+  Repository repository = 1 [(target_repository)=true];
+  // merged_only if set, will only return branches that are merged into root ref.
+  bool merged_only = 2;
+  // merged_branches is the list of branches from which we return those merged into
+  // the root ref. Used only when merged_only is set to true.
+  repeated bytes merged_branches = 3;
+}
+
+// FindAllBranchesResponse is a response for the FindAllBranches RPC.
+message FindAllBranchesResponse {
+  // Branch is a branch found in the repository.
+  message Branch {
+    // name is the name of the branch.
+    bytes name = 1;
+    // target is the commit referenced by the branch.
+    GitCommit target = 2;
+  }
+
+  // branches is a list of branches found in the repository.
+  repeated Branch branches = 1;
+}
+
+// FindTagRequest is a request for the FindTag RPC.
+message FindTagRequest {
+  // repository is the repository to look up the tag in.
+  Repository repository = 1 [(target_repository)=true];
+  // tag_name is the name of the tag that should be looked up. The caller is supposed to pass in the
+  // tag name only, so if e.g. a tag `refs/tags/v1.0.0` exists, then the caller should pass `v1.0.0`
+  // as argument.
+  bytes tag_name = 2;
+}
+
+// FindTagResponse is a response for the FindTag RPC.
+message FindTagResponse {
+  // tag is the tag that was found.
+  Tag tag = 1;
+}
+
+// FindTagError is an error that will be returned by the FindTag RPC under specific error
+// conditions.
+message FindTagError {
+  oneof error {
+    // tag_not_found indicates that the tag was not found.
+    ReferenceNotFoundError tag_not_found = 1;
+  }
+}
+
+// FindAllTagsRequest is a request for the FindAllTags RPC.
+message FindAllTagsRequest {
+  // SortBy allows to specify desired order of the elements.
+  message SortBy {
+    // Key is a key used for sorting.
+    enum Key {
+      // REFNAME is for the `refname` field and is the default option.
+      REFNAME = 0; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX ENUM_FIELD_NAMES_ZERO_VALUE_END_WITH
+      // CREATORDATE is for the `creatordate` field.
+      CREATORDATE = 1; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+      // VERSION_REFNAME sorts tags by their semantic versions (https://semver.org/).
+      // tag names that are not semantic versions are sorted lexicographically. They come before
+      // the semantic versions if the direction is ascending and after the semantic versions if
+      // the direction is descending.
+      VERSION_REFNAME = 2; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+    }
+
+    // key is the key that tags are sorted by.
+    Key key = 1;
+    // direction is the direction that tags should be sorted in.
+    SortDirection direction = 2;
+  }
+
+  // repository is the repository to look up the tags in.
+  Repository repository = 1 [(target_repository)=true];
+  // sort_by allows to request tags in particular order.
+  SortBy sort_by = 2;
+  // pagination_params controls paging. Refer to PaginationParameter documentation for
+  // further info.
+  PaginationParameter pagination_params = 3;
+}
+
+// FindAllTagsResponse is a response for the FindAllTags RPC.
+message FindAllTagsResponse {
+  // tags is a list of the found tags.
+  repeated Tag tags = 1;
+}
+
+// RefExistsRequest is a request for the RefExists RPC.
+message RefExistsRequest {
+  // repository is the repository to check if the reference exists in.
+  Repository repository = 1 [(target_repository)=true];
+  // ref denotes any ref, e.g. 'refs/heads/master' or 'refs/tags/v1.0.1'.
+  // Must start with 'refs/'.
+  bytes ref = 2;
+}
+
+// RefExistsResponse is a response for the RefExists RPC.
+message RefExistsResponse {
+  // value represents if the reference exists.
+  bool value = 1;
+}
+
+// FindBranchRequest is a request for the FindBranch RPC.
+message FindBranchRequest {
+  // repository is the repository in which the branch should be looked up.
+  Repository repository = 1 [(target_repository)=true];
+  // name is the name of the branch which should be looked up. This must be the
+  // branch name only, it must not have the "refs/heads/" prefix.
+  bytes name = 2;
+}
+
+// FindBranchResponse is a response for the FindBranch RPC.
+message FindBranchResponse {
+  // branch is the found branch.
+  Branch branch = 1;
+}
+
+// UpdateReferencesRequest is a request for the UpdateReferences RPC.
+message UpdateReferencesRequest {
+  // Update represents a reference update.
+  message Update {
+    // reference is the fully-qualified reference name that should be updated.
+    bytes reference = 1;
+
+    // old_object_id is the object ID the reference should be pointing to in order to be updated.
+    // This has the intent to avoid time-of-check-time-of-use-style races when the object ID
+    // has changed.
+    //
+    // If empty, the reference will be force-updated without any such checks. If set to the
+    // all-zeroes object ID, this will verify that the branch did not exist previously.
+    bytes old_object_id = 2;
+
+    // new_object_id is the object ID the reference should be updated to. If set to the all-zeroes
+    // object ID the branch will be deleted.
+    bytes new_object_id = 3;
+  };
+
+  // repository is the repository where references shall be updated in.
+  Repository repository = 1 [(target_repository)=true];
+  // updates is the set of reference updates that shall be performed.
+  repeated Update updates = 2;
+}
+
+// UpdateReferencesResponse is a response for the UpdateReferences RPC.
+message UpdateReferencesResponse {
+}
+
+// UpdateReferencesError is returned when UpdateReferences fails to update references in some specific well-defined
+// cases.
+message UpdateReferencesError {
+  oneof error {
+    // invalid_format is returned when one or more of the refs to be deleted
+    // have an invalid format.
+    InvalidRefFormatError invalid_format = 1;
+    // references_locked is returned when the references to be deleted are already
+    // locked by another process.
+    ReferencesLockedError references_locked = 2;
+    // reference_state_mismatch is return for unforced reference updates when the expected object ID does not match
+    // the actual object ID of the reference. This indicates either mismatching expectations or a race with another
+    // client that has updated the reference concurrently.
+    ReferenceStateMismatchError reference_state_mismatch = 3;
+  }
+}
+
+// DeleteRefsRequest is a request for the DeleteRefs RPC.
+message DeleteRefsRequest{
+  // repository is the repository that reference is deleted from.
+  Repository repository = 1 [(target_repository)=true];
+  // except_with_prefix is the prefix used to determine which references to exclude from being deleted.
+  // This field can not be set in combination with the refs field. If the refs field is not set, except_with_prefix
+  // must contain at least one prefix as deleting all references in not allowed.
+  repeated bytes except_with_prefix = 2; // protolint:disable:this REPEATED_FIELD_NAMES_PLURALIZED
+  // refs is the list of references to be deleted. This field can not be set in combination with except_with_prefix
+  // and cannot be empty if except_with_prefix is also empty.
+  repeated bytes refs = 3;
+}
+
+// DeleteRefsResponse is a response for the DeleteRefs RPC.
+message DeleteRefsResponse {
+  // git_error is a Git error returned by the RPC. Is empty if no error occurs.
+  string git_error = 1;
+}
+
+// DeleteRefsError is returned when DeleteRefs fails to delete refs
+message DeleteRefsError {
+  oneof error {
+    // invalid_format is returned when one or more of the refs to be deleted
+    // have an invalid format.
+    InvalidRefFormatError invalid_format = 1;
+    // references_locked is returned when the references to be deleted are already
+    // locked by another process.
+    ReferencesLockedError references_locked = 2;
+  }
+}
+
+// ListBranchNamesContainingCommitRequest is a request for the ListBranchNamesContainingCommit RPC.
+message ListBranchNamesContainingCommitRequest {
+  // repository is the repository to find branches with the specified commit in.
+  Repository repository = 1 [(target_repository)=true];
+  // commit_id is the commit ID used to find branches.
+  string commit_id = 2;
+  // limit the number of tag names to be returned
+  // If the limit is set to zero, all items will be returned
+  uint32 limit = 3;
+}
+
+// ListBranchNamesContainingCommitResponse is a response for the ListBranchNamesContainingCommit RPC.
+message ListBranchNamesContainingCommitResponse {
+  reserved 1;
+  // branch_names contains a list of found branch names.
+  repeated bytes branch_names = 2;
+}
+
+// ListTagNamesContainingCommitRequest is a request for the ListTagNamesContainingCommit RPC.
+message ListTagNamesContainingCommitRequest {
+  // repository is the repository to find tags with the specified commit in.
+  Repository repository = 1 [(target_repository)=true];
+  // commit_id is the commit ID used to find tags.
+  string commit_id = 2;
+  // limit the number of tag names to be returned
+  // If the limit is set to zero, all items will be returned
+  uint32 limit = 3;
+}
+
+// ListTagNamesContainingCommitResponse is a response for the ListTagNamesContainingCommit RPC.
+message ListTagNamesContainingCommitResponse {
+  reserved 1;
+  // tag_names contains a list of tag names found.
+  repeated bytes tag_names = 2;
+}
+
+// GetTagSignaturesRequest is a request for the GetTagSignatures RPC.
+message GetTagSignaturesRequest {
+  // repository is the repository in which tag signatures should be looked up.
+  Repository repository = 1 [(target_repository)=true];
+  // tag_revisions is the set of revisions which that should be looked up. Revisions
+  // supports the syntax as specified by gitrevisions(7). All revisions are expected
+  // to resolve to annotated tag objects. At least one revision must be provided.
+  repeated string tag_revisions = 2;
+}
+
+// GetTagSignaturesResponse is a response for a GetTagSignatures request. Each response
+// may contain multiple TagSignatures. In case TagSignatures don't fit into a single
+// response, signatures will be batched in multiple responses.
+message GetTagSignaturesResponse {
+  // TagSignature represents the signature of a signed tag.
+  message TagSignature {
+    // tag_id is the resolved object ID of the tag.
+    string tag_id = 1;
+    // signature contains the cryptographic signature of the tag. If the tag is not
+    // cryptographically signed, then the signature is unset.
+    bytes signature = 2;
+    // content contains the contents which are signed by the signature. Contents
+    // include both the commit message, but also the commit metadata like author and
+    // subject.
+    bytes content = 3;
+  }
+
+  // signatures is the set of signatures found.
+  repeated TagSignature signatures = 1;
+}
+
+// GetTagMessagesRequest is a request for the GetTagMessages RPC.
+message GetTagMessagesRequest {
+  reserved 2;
+  reserved "tag_names";
+
+  // repository is the repository to get tag messages from.
+  Repository repository = 1 [(target_repository)=true];
+  // tag_ids is the list of annotated tag IDs used to get the tag messages.
+  repeated string tag_ids = 3;
+}
+
+// GetTagMessagesResponse is a response for the GetTagMessages RPC. Annotated tag messages are
+// chunked and streamed back to the client across multiple response messages sequentially. Each
+// series of responses for a given tag begins with a response that contains only the associated tag
+// ID and is subsequently followed by responses containing the tag message contents. This is
+// repeated for each annotated tag included as part of the response stream.
+message GetTagMessagesResponse {
+  reserved 1;
+  reserved "tag_name";
+
+  // message content from the annotated tag message.
+  bytes message = 2;
+  // tag_id is the ID of the tag for which the message belongs.
+  string tag_id = 3;
+}
+
+// FindAllRemoteBranchesRequest is a request for the FindAllRemoteBranches RPC.
+message FindAllRemoteBranchesRequest {
+  // repository is the repository to find remote branches from.
+  Repository repository = 1 [(target_repository)=true];
+  // remote_name is the name of the remote repository.
+  string remote_name = 2;
+}
+
+// FindAllRemoteBranchesResponse is a request for the FindAllRemoteBranches RPC.
+message FindAllRemoteBranchesResponse {
+  // branches contains a list of found remote branches.
+  repeated Branch branches = 1;
+}
+
+// ListRefsRequest is a request for the ListRefs RPC.
+message ListRefsRequest {
+  // SortBy defines the field to sort on and its direction.
+  message SortBy {
+    // Key is a key used for sorting.
+    // https://git-scm.com/docs/git-for-each-ref#Documentation/git-for-each-ref.txt---sortltkeygt
+    enum Key {
+      // REFNAME is for the `refname` field and is the default option.
+      REFNAME       = 0; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX ENUM_FIELD_NAMES_ZERO_VALUE_END_WITH
+      // CREATORDATE is for the `creatordate` field.
+      CREATORDATE   = 1; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+      // AUTHORDATE is for the `authordate` field.
+      AUTHORDATE    = 2; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+      // COMMITTERDATE is for the `committerdate` field.
+      COMMITTERDATE = 3; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+    }
+
+    // key is a key used for sorting.
+    Key key = 1;
+    // direction is the direction that tags should be sorted in.
+    SortDirection direction = 2;
+  }
+
+  // repository is the repository in which references should be listed in.
+  Repository repository = 1 [(target_repository)=true];
+  // patterns contains all patterns which shall be listed. Patterns should be in the format
+  // accepted by git-for-each-ref(1). At least one pattern must be given, otherwise an error
+  // is returned. Patterns which don't match any reference will be silently ignored.
+  repeated bytes patterns = 2;
+  // head determines whether the RPC should also return the HEAD reference. By default,
+  // pseudo-refs are not included in the response.
+  bool head = 3;
+  // sort_by allows to request SHAs in particular order.
+  SortBy sort_by = 4;
+  // pointing_at_oids is a list of OIDs that can optionally be passed to only return refs
+  // pointing at the given OIDs. This corresponds to the --points-at option of git-for-each-ref(1).
+  repeated bytes pointing_at_oids = 5;
+  // peel_tags controls whether annotated tags should be peeled to their target objects so that the
+  // `PeeledTarget` returned for the reference is the ID of the target object. Note that this
+  // will significantly slow down the request by a factor of 3 to 4.
+  bool peel_tags = 6;
+  // pagination_params controls paging. Refer to PaginationParameter documentation for
+  // further info.
+  PaginationParameter pagination_params = 7;
+}
+
+// ListRefsResponse is a response for the ListRefs RPC. The RPC can return multiple responses
+// in case there are more references than fit into a single gRPC message.
+message ListRefsResponse{
+  // Reference is a direct Git reference. No symbolic references will ever be returned by this RPC.
+  message Reference {
+    // name is the fully qualified name of the reference.
+    bytes name = 1;
+    // target is the object ID the reference points to.
+    string target = 2;
+    // peeled_target is the object ID an annotated tag points to. This field is only set when
+    // `PeelTags=true`. This field is empty in case the object is not an annotated tag.
+    string peeled_target = 3;
+  }
+
+  // references is the set of references returned by the RPC.
+  repeated Reference references = 1;
+
+  // pagination_cursor contains the page token to fetch the next page of results. Refer to PaginationCursor
+  // documentation for further info.
+  PaginationCursor pagination_cursor = 2;
+}
+
+// FindRefsByOIDRequest is a request for the FindRefsByOID RPC.
+message FindRefsByOIDRequest {
+  // repository is the repository in which references will be looked for.
+  Repository repository = 1 [(target_repository)=true];
+  // oid is an object ID to find references for.
+  string oid = 2;
+  // ref_patterns can be one of branch name, tag name or fully qualified ref name.
+  // Providing more than one pattern will yield refs that match any of the given patterns.
+  // If left empty, defaults to "refs/heads/" and "refs/tags/"
+  repeated string ref_patterns = 3;
+  // sort_field determines the sort order of the resulting refs.
+  // If left empty, defaults to "refname" (lexicographic refname order)
+  string sort_field = 4;
+  // limit limits the amount of results returned. 0 means no limit.
+  uint32 limit = 5;
+}
+
+// FindRefsByOIDResponse is a response for the FindRefsByOID RPC.
+message FindRefsByOIDResponse {
+  // refs is the set of fully-qualified references which have been found.
+  repeated string refs = 1;
+}

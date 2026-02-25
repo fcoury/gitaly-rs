@@ -1,0 +1,205 @@
+syntax = "proto3";
+
+package gitaly;
+
+import "lint.proto";
+import "shared.proto";
+
+option go_package = "gitlab.com/gitlab-org/gitaly/v18/proto/go/gitalypb";
+
+// HookService is a service which provides the implementation of a subset of
+// Git hooks. These are typically invoked via the `gitaly-hooks` binary to
+// ensure that the actual hook logic is executed in the context of the server.
+service HookService {
+
+  // PreReceiveHook ...
+  rpc PreReceiveHook(stream PreReceiveHookRequest) returns (stream PreReceiveHookResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // PostReceiveHook ...
+  rpc PostReceiveHook(stream PostReceiveHookRequest) returns  (stream PostReceiveHookResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // UpdateHook ...
+  rpc UpdateHook(UpdateHookRequest) returns (stream UpdateHookResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // ReferenceTransactionHook ...
+  rpc ReferenceTransactionHook(stream ReferenceTransactionHookRequest) returns (stream ReferenceTransactionHookResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // PackObjectsHookWithSidechannel is an optimized version of PackObjectsHook that uses
+  // a unix socket side channel.
+  rpc PackObjectsHookWithSidechannel(PackObjectsHookWithSidechannelRequest) returns (PackObjectsHookWithSidechannelResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // ProcReceiveHook is a hook invoked by git-receive-pack(1) [1]. This hook is responsible
+  // for updating the relevant references and reporting the results back to receive-pack.
+  //
+  // [1]: https://git-scm.com/docs/githooks#proc-receive
+  rpc ProcReceiveHook(stream ProcReceiveHookRequest) returns (stream ProcReceiveHookResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  };
+}
+
+// PreReceiveHookRequest ...
+message PreReceiveHookRequest {
+  // repository ...
+  Repository repository = 1 [(target_repository)=true];
+  // environment_variables ...
+  repeated string environment_variables = 2;
+  // stdin ...
+  bytes stdin = 4;
+  // git_push_options ...
+  repeated string git_push_options = 5;
+}
+
+// PreReceiveHookResponse ...
+message PreReceiveHookResponse{
+  // stdout ...
+  bytes stdout = 1;
+  // stderr ...
+  bytes stderr = 2;
+  // exit_status ...
+  ExitStatus exit_status = 3;
+}
+
+// PostReceiveHookRequest ...
+message PostReceiveHookRequest {
+  // repository ...
+  Repository repository = 1 [(target_repository)=true];
+  // environment_variables ...
+  repeated string environment_variables = 2;
+  // stdin ...
+  bytes stdin = 3;
+  // git_push_options ...
+  repeated string git_push_options = 4;
+}
+
+// PostReceiveHookResponse ...
+message PostReceiveHookResponse{
+  // stdout ...
+  bytes stdout = 1;
+  // stderr ...
+  bytes stderr = 2;
+  // exit_status ...
+  ExitStatus exit_status = 3;
+}
+
+// UpdateHookRequest ...
+message UpdateHookRequest {
+  // repository ...
+  Repository repository = 1 [(target_repository)=true];
+  // environment_variables ...
+  repeated string environment_variables = 2;
+  // ref ...
+  bytes ref = 3;
+  // old_value ...
+  string old_value = 4;
+  // new_value ...
+  string new_value = 5;
+}
+
+// UpdateHookResponse ...
+message UpdateHookResponse{
+  // stdout ...
+  bytes stdout = 1;
+  // stderr ...
+  bytes stderr = 2;
+  // exit_status ...
+  ExitStatus exit_status = 3;
+}
+
+// ReferenceTransactionHookRequest ...
+message ReferenceTransactionHookRequest {
+  // State ...
+  enum State {
+    // PREPARED ...
+    PREPARED = 0; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX ENUM_FIELD_NAMES_ZERO_VALUE_END_WITH
+    // COMMITTED ...
+    COMMITTED = 1; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+    // ABORTED ...
+    ABORTED = 2; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+  }
+
+  // repository ...
+  Repository repository = 1 [(target_repository)=true];
+  // environment_variables ...
+  repeated string environment_variables = 2;
+  // stdin ...
+  bytes stdin = 3;
+  // state ...
+  State state = 4;
+}
+
+// ReferenceTransactionHookResponse ...
+message ReferenceTransactionHookResponse {
+  // stdout ...
+  bytes stdout = 1;
+  // stderr ...
+  bytes stderr = 2;
+  // exit_status ...
+  ExitStatus exit_status = 3;
+}
+
+// PackObjectsHookWithSidechannelRequest ...
+message PackObjectsHookWithSidechannelRequest {
+  // repository ...
+  Repository repository = 1 [(target_repository)=true];
+  // args contains the arguments passed to the pack-objects hook, without the leading "git"
+  repeated string args = 2;
+  // gl_id is the user id of the initator of the fetch
+  string gl_id = 3;
+  // gl_username is the username of the initator of the fetch
+  string gl_username = 5;
+  // git_protocol is the protocol used for the fetch
+  string git_protocol = 6;
+  // remote_ip is the original IP of the initator of the fetch. This field is used as the key for
+  // concurrency limiting before we trigger git-pack-objects command
+  string remote_ip = 7;
+  // environment_variables contains the environment variables passed to the hook invocation.
+  repeated string environment_variables = 8;
+}
+
+// PackObjectsHookWithSidechannelResponse ...
+message PackObjectsHookWithSidechannelResponse {
+}
+
+// ProcReceiveHookRequest is the request for the ProcReceiveHook RPC.
+message ProcReceiveHookRequest {
+  // repository is the repository the hook operates on. This field is unused
+  // currently since we gather all information from stdin.
+  Repository repository = 1 [(target_repository)=true];
+  // environment_variables is the set of env variables to be passed to the RPC.
+  repeated string environment_variables = 2;
+  // stdin is a chunk of raw data which the hook receives.
+  bytes stdin = 3;
+}
+
+// ProcReceiveHookResponse is the response for the ProcReceiveHook RPC.
+message ProcReceiveHookResponse {
+  // stdout is a chunk of raw data to be output to stdout of the hook.
+  bytes stdout = 1;
+  // stderr is a chunk of raw data to be output to stderr of the hook.
+  bytes stderr = 2;
+  // exit_status is the exit status that the hooks outputs, this dictates the
+  // success/failure of git-receive-pack(1).
+  ExitStatus exit_status = 3;
+}

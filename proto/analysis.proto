@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package gitaly;
+
+import "lint.proto";
+import "shared.proto";
+
+option go_package = "gitlab.com/gitlab-org/gitaly/v18/proto/go/gitalypb";
+
+// AnalysisService is a gRPC service providing RPCs that analyze objects in a repository.
+service AnalysisService {
+
+  // CheckBlobsGenerated checks a provided set of blobs in a specified repository to determine
+  // whether the file is considered generated. This RPC supports bidirectional streaming because the
+  // client may specify any number of files to check across multiple request messages and the server
+  // responds to each request with a separate set of response messages.
+  //
+  // Each provided blob in the request is validated when received. Improperly formatted requests
+  // result in RPC termination and an error being returned to the client. The RPC also aborts and
+  // returns an error if requests are made that list Git revisions which do not resolve to a blob
+  // and/or cannot be found in the repository.
+  rpc CheckBlobsGenerated(stream CheckBlobsGeneratedRequest) returns (stream CheckBlobsGeneratedResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+}
+
+// CheckBlobsGeneratedRequest is a request for the CheckBlobsGenerated RPC. The client may send
+// multiple requests through the stream to check multiple sets of files. The first request must have
+// the repository field set. Every request, including the first, must contain a blob set with at
+// least a single entry.
+message CheckBlobsGeneratedRequest {
+  // Blob defines the required information to determine if a blob is generated.
+  message Blob {
+    // revision is a Git revision that resolves to a blob.
+    bytes revision = 1;
+    // path is the file path of the blob and is used to gain insight as to whether the blob is
+    // generated.
+    bytes path = 2;
+  }
+
+  // repository is the repository that generated files are being checked for.
+  Repository repository = 1 [(target_repository)=true];
+  // blobs is a set of blobs that the generated file check is being performed on.
+  repeated Blob blobs = 2;
+}
+
+// CheckBlobsGeneratedResponse is a response for the CheckBlobsGenerated RPC. If the client sends
+// multiple requests, the server responds with a separate response message for each request.
+message CheckBlobsGeneratedResponse {
+  // Blob defines the status of the generated blob check for a revision.
+  message Blob {
+    // revision is the Git revision of the checked blob provided in the request.
+    bytes revision = 1;
+    // generated is the result of the file generation check for a particular blob.
+    bool generated = 2;
+  }
+
+  // blobs is a set of blobs that the generated file check has been performed on.
+  repeated Blob blobs = 1;
+}

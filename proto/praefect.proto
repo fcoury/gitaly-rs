@@ -1,0 +1,222 @@
+syntax = "proto3";
+
+package gitaly;
+
+import "google/protobuf/timestamp.proto";
+import "lint.proto";
+import "shared.proto";
+
+option go_package = "gitlab.com/gitlab-org/gitaly/v18/proto/go/gitalypb";
+
+// PraefectInfoService is a service which provides RPCs to query and modify
+// Praefect-specific parameters.
+service PraefectInfoService {
+  option (intercepted) = true;
+
+  // RepositoryReplicas ...
+  rpc RepositoryReplicas(RepositoryReplicasRequest) returns (RepositoryReplicasResponse);
+
+  // Dataloss provides information on repositories in Praefect that are in a degraded state and
+  // thus susceptible to dataloss. A repository is considered degraded when its replicas are
+  // outdated and/or unavailable.
+  rpc Dataloss(DatalossRequest) returns (stream DatalossResponse);
+
+  // SetAuthoritativeStorage sets the authoritative storage for a repository on a given virtual storage.
+  // This causes the current version of the repository on the authoritative storage to be considered the
+  // latest and overwrite any other version on the virtual storage.
+  rpc SetAuthoritativeStorage(SetAuthoritativeStorageRequest) returns (SetAuthoritativeStorageResponse);
+
+  // MarkUnverified marks replicas as unverified. This will trigger verification as Praefect's metadata
+  // verifier prioritizes unverified replicas.
+  rpc MarkUnverified(MarkUnverifiedRequest) returns (MarkUnverifiedResponse);
+
+  // SetReplicationFactor assigns or unassigns host nodes from the repository to meet the desired replication factor.
+  // SetReplicationFactor returns an error when trying to set a replication factor that exceeds the storage node count
+  // in the virtual storage. An error is also returned when trying to set a replication factor below one. The primary node
+  // won't be unassigned as it needs a copy of the repository to accept writes. Likewise, the primary is the first storage
+  // that gets assigned when setting a replication factor for a repository. Assignments of unconfigured storages are ignored.
+  // This might cause the actual replication factor to be higher than desired if the replication factor is set during an upgrade
+  // from a Praefect node that does not yet know about a new node. As assignments of unconfigured storages are ignored, replication
+  // factor of repositories assigned to a storage node removed from the cluster is effectively decreased.
+  rpc SetReplicationFactor(SetReplicationFactorRequest) returns (SetReplicationFactorResponse);
+
+  // GetRepositoryMetadata returns the cluster metadata for a repository. Returns NotFound if the repository does not exist.
+  rpc GetRepositoryMetadata(GetRepositoryMetadataRequest) returns (GetRepositoryMetadataResponse);
+
+}
+
+// MarkUnverifiedRequest specifies the replicas which to mark unverified.
+message MarkUnverifiedRequest {
+  // Storage identifies a single storage in a virtual storage.
+  message Storage {
+    // virtual_storage is the virtual storage the storage is part of.
+    string virtual_storage = 1;
+    // storage is the name of the storage.
+    string storage = 2;
+  }
+
+  // selector specifies the replicas which to mark unverified.
+  oneof selector {
+    // repository_id is the id of a repository to mark all replicas for unverified.
+    int64 repository_id = 1;
+    // virtual_storage is the name of virtual storage which will have all of its replicas
+    // marked unverified.
+    string virtual_storage = 2;
+    // storage specifies a single storage. The replicas on the storage marked unverified.
+    Storage storage = 3;
+  }
+}
+
+// MarkUnverifiedResponse returns the number of replicas marked unverified.
+message MarkUnverifiedResponse {
+  // replicas_marked indicates the number of replicas that were marked unverified.
+  int64 replicas_marked = 1;
+}
+
+// GetRepositoryMetadataRequest specifies the repository to retrieve metadata for.
+message GetRepositoryMetadataRequest {
+  // Path ...
+  message Path {
+    // virtual_storage is the virtual storage where the repository is.
+    string virtual_storage = 1;
+    // relative_path is the relative path of the repository in the virtual storage.
+    string relative_path = 2;
+  }
+
+  oneof query {
+    // repository_id is the ID of the repository to retrieve information for.
+    int64 repository_id = 1;
+    // path is the external path of the repository to retrieve information for.
+    Path path = 2;
+  };
+}
+
+// GetRepositoryMetadataResponse contains the repository's cluster metadata.
+message GetRepositoryMetadataResponse {
+  // Replica ...
+  message Replica {
+    // storage is the name of the replica's storage.
+    string storage = 1;
+    // assigned indicates whether the replica is on an assigned storage.
+    bool assigned = 2;
+    // generation is the replicas confirmed generation. Generation is -1 if the replica
+    // does not yet exist.
+    int64 generation = 4;
+    // healthy indicates whether the replica is on a healthy storage.
+    bool healthy = 5;
+    // valid_primary indicates whether the replica is considered a valid primary.
+    bool valid_primary = 6;
+    // verified_at is the last successful verification time of the replica.
+    google.protobuf.Timestamp verified_at = 7;
+  }
+
+  // repository_id is the internal ID of the repository.
+  int64 repository_id = 1;
+  // virtual_storage is the virtual storage in which the repository is located.
+  string virtual_storage = 2;
+  // relative_path is the relative path of the repository in the virtual storage.
+  string relative_path = 3;
+  // replica_path is the path on the disk where the replicas are stored.
+  string replica_path = 4;
+  // primary is the current primary of the repository.
+  string primary = 5;
+  // generation is the repository's current generation.
+  int64 generation = 6;
+  // replicas are the existing and supposed to exist replicas of this repository.
+  repeated Replica replicas = 7;
+}
+
+// SetReplicationFactorRequest sets the desired replication factor for a repository.
+message SetReplicationFactorRequest {
+  // virtual_storage is the virtual storage the repository is located in
+  string virtual_storage = 1;
+  // relative_path is the relative path of the repository
+  string relative_path = 2;
+  // replication_factor is the desired replication factor. Replication must be equal or greater than 1.
+  int32 replication_factor = 3;
+}
+
+// SetReplicationFactorResponse returns the assigned hosts after setting the desired replication factor.
+message SetReplicationFactorResponse {
+  // storages are the storages assigned to host the repository.
+  repeated string storages = 1;
+}
+
+// SetAuthoritativeStorageRequest ...
+message SetAuthoritativeStorageRequest {
+  // virtual_storage ...
+  string virtual_storage = 1;
+  // relative_path ...
+  string relative_path = 2;
+  // authoritative_storage ...
+  string authoritative_storage = 3;
+}
+
+// SetAuthoritativeStorageResponse ...
+message SetAuthoritativeStorageResponse {
+}
+
+// DatalossRequest is the request for data loss information
+message DatalossRequest {
+  // virtual_storage is the virtual storage to get dataloss information for.
+  string virtual_storage = 1;
+  // include_partially_replicated indicates whether to include repositories which are available but
+  // are unavailable on some assigned storages.
+  bool include_partially_replicated = 2;
+}
+
+// DatalossResponse contains information about a repository that may be behind
+// the primary.
+message DatalossResponse {
+  // Repository is the status of a repository
+  message Repository {
+    // Storage ...
+    message Storage {
+      // name of the storage
+      string name = 1;
+      // behind_by indicates how many generations this storage is behind.
+      int64 behind_by = 2;
+      // assigned indicates whether the storage is assigned to host the repository.
+      bool assigned = 3;
+      // healthy indicates whether the storage is considered healthy by the consensus of Praefect nodes.
+      bool healthy = 4;
+      // valid_primary indicates whether the storage is ready to act as the primary if necessary.
+      bool valid_primary = 5;
+    }
+
+    // relative_path of the repository with outdated replicas
+    string relative_path = 1;
+    // storages on which the repository is outdated
+    repeated Storage storages = 2;
+    // unavailable indicates whether the repository is in unavailable.
+    bool unavailable = 3;
+
+    // primary is the current primary storage of the repository.
+    string primary = 4;
+  }
+
+  // repositories with data loss
+  repeated Repository repositories = 2;
+}
+
+// RepositoryReplicasRequest ...
+message RepositoryReplicasRequest{
+  // repository ...
+  Repository repository = 1;
+}
+
+// RepositoryReplicasResponse ...
+message RepositoryReplicasResponse{
+  // RepositoryDetails ...
+  message RepositoryDetails {
+    // repository ...
+    Repository repository = 1;
+    // checksum ...
+    string checksum = 2;
+  };
+
+  // primary ...
+  RepositoryDetails primary = 1;
+  // replicas ...
+  repeated RepositoryDetails replicas = 2;
+}

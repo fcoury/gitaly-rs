@@ -1,0 +1,145 @@
+syntax = "proto3";
+
+package gitaly;
+
+import "lint.proto";
+import "packfile.proto";
+import "shared.proto";
+
+option go_package = "gitlab.com/gitlab-org/gitaly/v18/proto/go/gitalypb";
+
+// SSHService is a service that provides RPCs required for SSH-based Git clones.
+service SSHService {
+  // SSHUploadPackWithSidechannel is an RPC to forward git-upload-pack(1) to Gitaly for SSH
+  // sessions, via sidechannels. Sidechannel connections sidestep gRPC Protobuf message overhead and
+  // allow higher throughput of bulk data transfers. The stdin, stdout, and stderr for the
+  // git-upload-pack(1) are streamed through the sidechannel connection.
+  rpc SSHUploadPackWithSidechannel(SSHUploadPackWithSidechannelRequest) returns (SSHUploadPackWithSidechannelResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // SSHUploadPack is an RPC to forward git-upload-pack(1) to Gitaly for SSH
+  // sessions. The RPC uses bidirectional streaming so the client can stream
+  // stdin and the server can stream stdout and stderr.
+  rpc SSHUploadPack(stream SSHUploadPackRequest) returns (stream SSHUploadPackResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // SSHReceivePack is an RPC to forward git-receive-pack(1) to Gitaly for SSH sessions. The RPC uses
+  // bidirectional streaming so the client can stream stdin and the server can stream stdout and
+  // stderr for git-receive-pack(1).
+  rpc SSHReceivePack(stream SSHReceivePackRequest) returns (stream SSHReceivePackResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // SSHUploadArchive is an RPC to forward git-upload-archive(1) to Gitaly for SSH sessions. The RPC
+  // uses bidirectional streaming so the client can stream stdin and the server can stream stdout
+  // and stderr for git-upload-archive(1).
+  rpc SSHUploadArchive(stream SSHUploadArchiveRequest) returns (stream SSHUploadArchiveResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+}
+
+// SSHUploadPackWithSidechannelRequest is a request for the SSHUploadPackWithSidechannel RPC.
+message SSHUploadPackWithSidechannelRequest {
+  // repository is the repository where git-upload-pack(1) is spawned.
+  Repository repository = 1 [(target_repository)=true];
+  // git_config_options are parameters to use with git -c (key=value pairs).
+  repeated string git_config_options = 2;
+  // git_protocol is the git protocol version.
+  string git_protocol = 3;
+}
+
+// SSHUploadPackWithSidechannelResponse is a response for the SSHUploadPackWithSidechannel RPC.
+message SSHUploadPackWithSidechannelResponse {
+  // packfile_negotiation_statistics is the packfile negotiation statistics.
+  PackfileNegotiationStatistics packfile_negotiation_statistics = 1;
+}
+
+// SSHUploadPackRequest is a request for the SSHUploadPack RPC. All fields
+// other than stdin should be set in the first request message. Subsequent
+// requests in the stream should only contain the stdin field.
+message SSHUploadPackRequest {
+  // repository is the repository where git-upload-pack(1) is spawned.
+  Repository repository = 1 [(target_repository)=true];
+  // stdin is a chunk of raw data to be copied to git-upload-pack(1) standard input.
+  bytes stdin = 2;
+  // git_config_options are parameters to use with git -c (key=value pairs).
+  repeated string git_config_options = 3;
+  // git_protocol is the git protocol version.
+  string git_protocol = 4;
+}
+
+// SSHUploadPackResponse is a response for the SSHUploadPack RPC. Responses are
+// streamed back to clients in chunks containing the stdout and stderr from
+// git-upload-pack(1).
+message SSHUploadPackResponse {
+  // stdout is a chunk of raw data from git-upload-pack(1) standard output.
+  bytes stdout = 1;
+  // stderr is a chunk of raw data from git-upload-pack(1) standard error.
+  bytes stderr = 2;
+  // exit_status is the exit status when the command has finished. This field
+  // may be nil. This is intentional.
+  ExitStatus exit_status = 3;
+}
+
+// SSHReceivePackRequest is a request for the SSHReceivePack RPC. All fields other than stdin must
+// be set in the first request message. Subsequent requests in the stream must only contain the
+// stdin field.
+message SSHReceivePackRequest {
+  // repository is the repository where git-receive-pack(1) is spawned.
+  Repository repository = 1 [(target_repository)=true];
+  // stdin is a chunk of raw data to be copied to git-receive-pack(1) standard input
+  bytes stdin = 2;
+  // gl_id is the GitLab ID of the user. This is used by Git {pre,post}-receive hooks.
+  string gl_id = 3;
+  // gl_repository refers to the GitLab repository. This is used by Git {pre,post}-receive hooks.
+  string gl_repository = 4;
+  // gl_username is the GitLab Username of the user. This is used by Git {pre,post}-receive hooks.
+  string gl_username = 5;
+  // git_protocol is the git protocol version.
+  string git_protocol = 6;
+  // git_config_options are parameters to use with git -c (key=value pairs).
+  repeated string git_config_options = 7;
+}
+
+// SSHReceivePackResponse is a response for the SSHReceivePack RPC. Responses are stream back to
+// clients in chunks containing the stdout and stderr from git-receive-pack(1).
+message SSHReceivePackResponse {
+  // stdout is a chunk of raw data from git-receive-pack(1) standard output.
+  bytes stdout = 1;
+  // stderr is a chunk of raw data from git-receive-pack(1) standard error.
+  bytes stderr = 2;
+  // exit_status is the exit status when the command has finished. This field
+  // may be nil. This is intentional.
+  ExitStatus exit_status = 3;
+}
+
+// SSHUploadArchiveRequest is a request for the SSHUploadArchive RPC. The first request of the
+// stream must only contain repository. All subsequent requests must only contain stdin data.
+message SSHUploadArchiveRequest {
+  // repository is the repository where git-upload-archive(1) is spawned.
+  Repository repository = 1 [(target_repository)=true];
+  // stdin is a chunk of raw data to be copied to git-upload-archive(1) standard input.
+  bytes stdin = 2;
+}
+
+// SSHUploadArchiveResponse is a response for the SSHUploadArchive RPC. Responses are stream back to
+// clients in chunks containing the stdout and stderr from git-upload-archive(1).
+message SSHUploadArchiveResponse {
+  // stdout is a chunk of raw data from git-upload-archive(1) standard output.
+  bytes stdout = 1;
+  // stderr is a chunk of raw data from git-upload-archive(1) standard error.
+  bytes stderr = 2;
+  // exit_status is the exit status when the command has finished. This field
+  // may be nil. This is intentional.
+  ExitStatus exit_status = 3;
+}

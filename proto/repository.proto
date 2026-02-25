@@ -1,0 +1,1467 @@
+syntax = "proto3";
+
+package gitaly;
+
+import "errors.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "lint.proto";
+import "shared.proto";
+
+option go_package = "gitlab.com/gitlab-org/gitaly/v18/proto/go/gitalypb";
+
+// RepositoryService is a service providing RPCs accessing repositories as a whole.
+service RepositoryService {
+
+  // RepositoryExists returns whether a given repository exists.
+  rpc RepositoryExists(RepositoryExistsRequest) returns (RepositoryExistsResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // RepositorySize returns information on the complete on-disk repository size. If you need more
+  // detailed information about the size of various sub-structures you should instead use the
+  // repositoryInfo RPC.
+  rpc RepositorySize(RepositorySizeRequest) returns (RepositorySizeResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // RepositoryInfo returns detailed information about a repository and its data structures.
+  rpc RepositoryInfo(RepositoryInfoRequest) returns (RepositoryInfoResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // ObjectsSize calculates the total on-disk object size of reachable objects in bytes. In contrast
+  // to RepositorySize and RepositoryInfo, this RPC performs a graph walk of the specified revisions
+  // and will thus return an accurate view of how large the accumulated on-disk size of reachable
+  // objects is.
+  //
+  // As this RPC needs to perform a revision walk, it is significantly more expensive than the RPCs
+  // which simply check the size of on-disk data structures. On the other hand, it allows the caller
+  // to accurately compute the size of objects in a way that is at least somewhat detached from the
+  // on-disk representation:
+  //
+  // - Objects which exist in multiple packfiles will not be double-counted.
+  // - Objects which aren't reachable will not be accounted for.
+  // - It is possible to only account for a subset of references, e.g. only those that an admin
+  //   would have direct control over.
+  //
+  // It is thus recommended to use this RPC whenever you want to calculate sizes which will end up
+  // being shown to the user.
+  //
+  // Note that the size is still bound to change when repositories are getting repacked and thus
+  // cannot be considered to be stable. This is because the on-disk size of any object can change
+  // depending on how Git decides to deltify it in a packfile. Thus, when a repack would cause a
+  // different delta base to be picked, the actual on-disk size of any given object may change.
+  rpc ObjectsSize(stream ObjectsSizeRequest) returns (ObjectsSizeResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // ObjectFormat determines the object format that is being used by the repository.
+  rpc ObjectFormat(ObjectFormatRequest) returns (ObjectFormatResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // FetchRemote fetches references from a remote repository into the local
+  // repository. The remote can be fetched via HTTP or SSH depending on the
+  // request options provided.
+  rpc FetchRemote(FetchRemoteRequest) returns (FetchRemoteResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // CreateRepository creates a new empty repository.
+  rpc CreateRepository(CreateRepositoryRequest) returns (CreateRepositoryResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // GetArchive produces and returns an archive of a repository.
+  rpc GetArchive(GetArchiveRequest) returns (stream GetArchiveResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // HasLocalBranches returns whether the given repo contains any branches.
+  rpc HasLocalBranches(HasLocalBranchesRequest) returns (HasLocalBranchesResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // FetchSourceBranch fetches a branch from a second (potentially remote)
+  // repository into the given repository.
+  rpc FetchSourceBranch(FetchSourceBranchRequest) returns (FetchSourceBranchResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // Fsck checks the repository for consistency via git-fsck(1). This can be used to check for
+  // repository corruption.
+  rpc Fsck(FsckRequest) returns (FsckResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // WriteRef creates or updates a ref in a repository to point to a new value.
+  // If the request contains object revisions that do not exist in the repository, the RPC returns
+  // the NOT_FOUND code with the ReferenceNotFoundError detail.
+  rpc WriteRef(WriteRefRequest) returns (WriteRefResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // FindMergeBase returns the best common ancestor between two or more commits. Consult the man
+  // pages of git-merge-base(1) for more information on how this is calculated.
+  rpc FindMergeBase(FindMergeBaseRequest) returns (FindMergeBaseResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // CreateFork creates a new repository from a specific source repository. This new repository will
+  // have the same branches and tags as the source repository. Internal references will not be
+  // recreated in the forked repository.
+  //
+  // all objects of the source repository will be duplicated, that is there are no space savings by
+  // creating the repository like this. The newly created repository does not join the object pool
+  // of the source repository, if there is any.
+  rpc CreateFork(CreateForkRequest) returns (CreateForkResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // CreateRepositoryFromURL creates a new repo and seeds it with the contents of an existing Git repo
+  // reachable at the provided URL.
+  rpc CreateRepositoryFromURL(CreateRepositoryFromURLRequest) returns (CreateRepositoryFromURLResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // CreateBundle creates a bundle from all refs
+  rpc CreateBundle(CreateBundleRequest) returns (stream CreateBundleResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // CreateBundleFromRefList creates a bundle from a stream of ref patterns.
+  // When the bundle would be empty the FailedPrecondition error code is returned.
+  rpc CreateBundleFromRefList(stream CreateBundleFromRefListRequest) returns (stream CreateBundleFromRefListResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // GenerateBundleURI generates a bundle on the server for bundle-URI use.
+  rpc GenerateBundleURI(GenerateBundleURIRequest) returns (GenerateBundleURIResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+
+  // FetchBundle fetches references from a bundle into the local repository.
+  // refs will be mirrored to the target repository with the refspec
+  // "+refs/*:refs/*" and refs that do not exist in the bundle will be removed.
+  rpc FetchBundle(stream FetchBundleRequest) returns (FetchBundleResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // CreateRepositoryFromBundle creates a Git repository at the specified storage and path, if it
+  // does not already exist, from the provided Git bundle.
+  rpc CreateRepositoryFromBundle(stream CreateRepositoryFromBundleRequest) returns (CreateRepositoryFromBundleResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // GetConfig reads the target repository's gitconfig and streams its contents
+  // back. Returns a NotFound error in case no gitconfig was found.
+  rpc GetConfig(GetConfigRequest) returns (stream GetConfigResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // FindLicense looks in the given repository and attempts to detect all the
+  // details about the license used in the repository.
+  rpc FindLicense(FindLicenseRequest) returns (FindLicenseResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // GetInfoAttributes reads the contents from info/attributes.
+  // This RPC will be removed in 17.0.
+  rpc GetInfoAttributes(GetInfoAttributesRequest) returns (stream GetInfoAttributesResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+    option deprecated = true;
+  }
+
+  // CalculateChecksum returns a checksum of the repository by hashing its references. Refs
+  // outside of well-known namespaces are not considered when computing the checksum.
+  rpc CalculateChecksum(CalculateChecksumRequest) returns (CalculateChecksumResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // GetSnapshot returns a snapshot of the repository. A snapshot comprises all Git references
+  // and objects required to recreate the state of a repository at a point in time.
+  rpc GetSnapshot(GetSnapshotRequest) returns (stream GetSnapshotResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // CreateRepositoryFromSnapshot creates a new repository based on a snapshot created with
+  // the GetSnapshot RPC. The snapshot is fetched via HTTP.
+  //
+  // Due to the inherent structure of the TAR format, it's challenging to definitively verify
+  // if a provided TAR file is complete or truncated/malformed. While basic integrity checks
+  // are performed, users should ensure the completeness and integrity of their TAR files.
+  rpc CreateRepositoryFromSnapshot(CreateRepositoryFromSnapshotRequest) returns (CreateRepositoryFromSnapshotResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // GetRawChanges returns metadata in raw format on the changes between two revisions.
+  rpc GetRawChanges(GetRawChangesRequest) returns (stream GetRawChangesResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // SearchFilesByContent searches files in the repository using the provided grep pattern.
+  // For each result, the matched line is returned along with the two previous and next lines.
+  rpc SearchFilesByContent(SearchFilesByContentRequest) returns (stream SearchFilesByContentResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // SearchFilesByName searches files in the repository based on its name and an
+  // optional filter.
+  rpc SearchFilesByName(SearchFilesByNameRequest) returns (stream SearchFilesByNameResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // RestoreCustomHooks sets the git hooks for a repository. The hooks are sent
+  // in a tar archive containing a `custom_hooks` directory. This directory is
+  // ultimately extracted to the repository.
+  rpc RestoreCustomHooks(stream RestoreCustomHooksRequest) returns (RestoreCustomHooksResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+    option deprecated = true;
+  }
+
+  // SetCustomHooks sets the git hooks for a repository. The hooks are sent in a
+  // tar archive containing a `custom_hooks` directory (i.e. the response from the
+  // GetCustomHooksResponse RPC. This directory will be extracted into the repository.
+  rpc SetCustomHooks(stream SetCustomHooksRequest) returns (SetCustomHooksResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // BackupCustomHooks fetches the git hooks for a repository. The hooks are
+  // sent in a tar archive containing a `custom_hooks` directory. If no hooks
+  // are present in the repository, the response will have no data.
+  rpc BackupCustomHooks(BackupCustomHooksRequest) returns (stream BackupCustomHooksResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+    option deprecated = true;
+  }
+
+  // GetCustomHooks fetches the git hooks for a repository. The hooks are sent
+  // in a tar archive containing a `custom_hooks` directory. If no hooks are
+  // present in the repository, the response will have no data.
+  rpc GetCustomHooks(GetCustomHooksRequest) returns (stream GetCustomHooksResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // GetObjectDirectorySize returns the size in kibibytes of the object directory of a repository.
+  rpc GetObjectDirectorySize(GetObjectDirectorySizeRequest) returns (GetObjectDirectorySizeResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // RemoveRepository will move the repository to `+gitaly/tmp/<relative_path>_removed` and
+  // eventually remove it. This ensures that even on networked filesystems the
+  // data is actually removed even if there's someone still handling the data.
+  rpc RemoveRepository(RemoveRepositoryRequest) returns (RemoveRepositoryResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // ReplicateRepository replicates data from a source repository to target repository. On the
+  // target repository, this operation ensures synchronization of the following components:
+  //
+  // - Git config
+  // - Git attributes
+  // - Custom Git hooks,
+  // - References and objects
+  // - (Optional) Object deduplication network membership
+  rpc ReplicateRepository(ReplicateRepositoryRequest) returns (ReplicateRepositoryResponse) {
+    option (op_type)  = {
+      op: MUTATOR
+    };
+  }
+
+  // OptimizeRepository performs all maintenance tasks in a repository to keep
+  // it in an efficient state. It cleans up stale data, repacks objects,
+  // updates auxiliary caches like commit-graphs and packs references. The
+  // optimizations performed are based on heuristics and will adapt to the
+  // repository's size. This RPC call is designed as a black-box such that
+  // Gitaly has complete control of the on-disk state of repositories.
+  rpc OptimizeRepository(OptimizeRepositoryRequest) returns (OptimizeRepositoryResponse) {
+    option (op_type)  = {
+      op: MAINTENANCE
+    };
+  }
+
+  // PruneUnreachableObjects will prune all objects which aren't reachable from
+  // the repository's current set of references. Because pruning can only
+  // happen for objects which aren't packed, you are required to first run
+  // OptimizeRepository to explode any unreachable objects into loose objects.
+  //
+  // Furthermore, this RPC call has a grace period of 30 minutes: any
+  // unreachable loose objects must not have been accessed or modified in the
+  // last 30 minutes. This is a hard requirement to avoid repository corruption.
+  //
+  // to make proper use of this RPC you thus need to call OptimizeRepository,
+  // wait 30 minutes, and then call PruneUnreachableObjects.
+  rpc PruneUnreachableObjects(PruneUnreachableObjectsRequest) returns (PruneUnreachableObjectsResponse) {
+    option (op_type)  = {
+      op: MAINTENANCE
+    };
+  }
+
+  // BackupRepository creates a full or incremental backup streamed directly to
+  // object-storage. The backup is created synchronously. The destination must
+  // be configured in config.backup.go_cloud_url
+  rpc BackupRepository(BackupRepositoryRequest) returns (BackupRepositoryResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // RestoreRepository restores a backup streamed directly from object-storage.
+  // The repository is restored synchronously. The source object-storage must
+  // be configured in config.backup.go_cloud_url
+  rpc RestoreRepository(RestoreRepositoryRequest) returns (RestoreRepositoryResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // GetFileAttributes queries given file attributes as specified in .gitattributes file
+  rpc GetFileAttributes(GetFileAttributesRequest) returns (GetFileAttributesResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // FastExport runs git-fast-export on the repository, streaming the data back through the response
+  rpc FastExport(FastExportRequest) returns (stream FastExportResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // MigrateReferenceBackend allows migrating a repository between the different Git
+  // reference backends. Transactions must be enabled.
+  rpc MigrateReferenceBackend(MigrateReferenceBackendRequest) returns (MigrateReferenceBackendResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+}
+
+// RepositoryExistsRequest is a request for the RepositoryExists RPC.
+message RepositoryExistsRequest {
+  // repository is the repo to check. The storage_name and relative_path attributes must be provided.
+  Repository repository = 1 [(target_repository)=true];
+}
+
+// RepositoryExistsResponse is a response for the RepositoryExists RPC.
+message RepositoryExistsResponse {
+  // exists indicates whether the repo exists.
+  bool exists = 1;
+}
+
+// RepositorySizeRequest is a request for the RepositorySize RPC.
+message RepositorySizeRequest {
+  // repository is the repository for which to determine the repository size.
+  Repository repository = 1 [(target_repository)=true];
+}
+
+// RepositorySizeResponse is a response for the RepositorySize RPC.
+message RepositorySizeResponse {
+  // size is the complete size of the on-disk repository in kilobytes. This will include all data
+  // structures and is similar to `du --summarize --bytes $REPO_PATH`.
+  int64 size = 1;
+}
+
+// RepositoryInfoRequest is a request for the RepositoryInfo RPC.
+message RepositoryInfoRequest {
+  // repository is the repository to query for information.
+  Repository repository = 1 [(target_repository)=true];
+}
+
+// RepositoryInfoResponse is a response for the RepositoryInfo RPC.
+message RepositoryInfoResponse {
+  // ReferencesInfo hosts information about references.
+  message ReferencesInfo {
+    // ReferenceBackend denotes the type of backend used to store references.
+    enum ReferenceBackend {
+      // REFERENCE_BACKEND_UNSPECIFIED is the default value for a reference backend if there
+      // is an error during detection. This state should ideally never occur, and if set
+      // it indicates that something has gone wrong.
+      REFERENCE_BACKEND_UNSPECIFIED = 0;
+      // REFERENCE_BACKEND_FILES is the traditional backend built using files/directories.
+      REFERENCE_BACKEND_FILES = 1;
+      // REFERENCE_BACKEND_REFTABLE is the new backend using customized binary file format.
+      REFERENCE_BACKEND_REFTABLE = 2;
+    };
+
+    // loose_count is the number of loose references that exist in the repository. These references
+    // are written whenever any reference either gets updated or created. Loose references have not
+    // yet been compressed into a packed format, which is an action that Gitaly performs regularly
+    // during repository maintenance.
+    //
+    // We do not provide the total size of loose references as it is a constant factor of the count
+    // anyway: `$count * $object_hash_length`.
+    uint64 loose_count = 1;
+    // packed_size is the size of packed references in bytes. Packed references are a more efficient
+    // way to store loose references. Given that determining the exact amount of references stored
+    // in packed format would require us to process the complete contents we don't provide the size
+    // here. A very rough estimate would be: `$size / 100`.
+    uint64 packed_size = 2;
+    // reference_backend is the backend used for storing references in the repository.
+    ReferenceBackend reference_backend = 3;
+  }
+
+  // ObjectsInfo hosts info about objects contained in a repository. It tries to bridge the gap
+  // between the actual on-disk state that is changing over time as Git introduces new ways to
+  // perform repository housekeeping and specific classifications of objects.
+  //
+  // One of the distinctions is between "recent" and "stale" objects. The set of recent objects
+  // contains these objects that have either been recently written/accessed or those which are
+  // reachable via any of the references. Stale objects on the other hand are those that are older
+  // than a certain grace period and which are not reachable via any reference. The exact details
+  // when the set of stale and recent objects is updated is an internal implementation detail of
+  // Gitaly and subject to change. It is safe to assume though that unreachable objects will
+  // eventually be marked stale when repository housekeeping runs on a repository.
+  message ObjectsInfo {
+    // size is the total size of all objects in the repository in bytes. It makes no distinction
+    // between the way they are stored or whether they are pending deletion.
+    uint64 size = 1;
+    // recent_size is the total size of all objects in bytes that are considered to be recent. Recent
+    // objects are likely reachable and will not be considered for deletion.
+    uint64 recent_size = 2;
+    // stale_size is the total size of all objects in bytes that are considered to be stale. Stale
+    // objects are likely unreachable and will eventually be deleted after a grace period. Objects
+    // which are part of cruft packs are always considered to be stale.
+    uint64 stale_size = 3;
+    // keep_size is the total size of all kept packfiles. Kept packfiles are packfiles that have a
+    // `.keep` file accompanying them. Packfiles marked with such a file will never be deleted by
+    // Git and will thus stay around forever, even if their objects are part of
+    // other packfiles already.
+    uint64 keep_size = 4;
+    // packfile_count is the number of all packfiles, including stale and kept ones.
+    uint64 packfile_count = 5;
+    // reverse_index_count is the number of reverse indices.
+    uint64 reverse_index_count = 6;
+    // cruft_count is the number of cruft packfiles which have a .mtimes file.
+    uint64 cruft_count = 7;
+    // keep_count is the number of .keep packfiles.
+    uint64 keep_count = 8;
+    // loose_objects_count is the number of loose objects.
+    uint64 loose_objects_count = 9;
+    // stale_loose_objects_count is the number of stale loose objects.
+    uint64 stale_loose_objects_count = 10;
+    // loose_objects_garbage_count is the number of garbage files in loose objects shards.
+    uint64 loose_objects_garbage_count = 11;
+  }
+
+  // CommitGraphInfo hosts information about the commit-graph of a repository.
+  message CommitGraphInfo {
+    // commit_graph_chain_length is the length of the commit-graph chain, if it exists. If the
+    // repository does not have a commit-graph chain but a monolithic commit-graph, then this
+    // field will be set to 0.
+    uint64 commit_graph_chain_length = 1;
+    // has_bloom_filters tells whether the commit-graph has bloom filters. Bloom filters are used
+    // to answer the question whether a certain path has been changed in the commit the bloom
+    // filter applies to.
+    bool has_bloom_filters = 2;
+    // has_generation_data tells whether the commit-graph has generation data. Generation
+    // data is stored as the corrected committer date, which is defined as the maximum
+    // of the commit's own committer date or the corrected committer date of any of its
+    // parents. This data can be used to determine whether a commit A comes after a
+    // certain commit B.
+    bool has_generation_data = 3;
+    // has_generation_data_overflow stores overflow data in case the corrected committer
+    // date takes more than 31 bits to represent.
+    bool has_generation_data_overflow = 5;
+  }
+
+  // BitmapInfo hosts information about bitmaps in a repository.
+  message BitmapInfo {
+    // has_hash_cache indicates whether the name hash cache extension exists in the bitmap.
+    bool has_hash_cache = 1;
+    // has_lookup_table indicates whether the lookup table exists in the bitmap.
+    bool has_lookup_table = 2;
+    // version is the version of the bitmap (currently only version 1 is supported by Git).
+    uint64 version = 3;
+  }
+
+  // MultiPackIndexInfo hosts information about the multi-pack-index.
+  message MultiPackIndexInfo {
+    // packfile_count is the count of packfiles that the multi-pack-index tracks.
+    uint64 packfile_count = 1;
+    // version is the version of the multi-pack-index (currently only version 1 is supported by Git).
+    uint64 version = 2;
+    // has_large_offsets determines whether the MIDX contains LOFF chunks. This may be required in case the indexed
+    // packfiles are so large that offsets are larger than 32 bytes.
+    bool has_large_offsets = 3;
+    // has_bitmapped_packs determines whether the MIDX contains BTMP chunks, which are used as bitmaps for individual
+    // packfiles contained in the MIDX.
+    bool has_bitmapped_packs = 4;
+    // has_reverse_index determines whether the MIDX contains RIDX chunks, which are used as reverse indices for
+    // individual packfiles contained in the MIDX.
+    bool has_reverse_index = 5;
+  }
+
+  // AlternatesInfo hosts information about alternate object directories.
+  message AlternatesInfo {
+    // object_directories contains the list of paths to object directories that the repository is linked to.
+    repeated string object_directories = 1;
+    // last_modified is the time when the alternates file has last been
+    // modified.
+    google.protobuf.Timestamp last_modified = 2;
+  }
+
+  // size is the total size of all files part of the repository. It does not include the size of
+  // directories.
+  uint64 size = 1;
+  // references contains information about references.
+  ReferencesInfo references = 2;
+  // objects contains information about objects.
+  ObjectsInfo objects = 3;
+  // commit_graph contains information about the repository's commit-graphs.
+  CommitGraphInfo commit_graph = 4;
+  // bitmap contains information about the bitmap, if any exists.
+  BitmapInfo bitmap = 5;
+  // multi_pack_index contains information about the multi-pack-index, if any exists.
+  MultiPackIndexInfo multi_pack_index = 6;
+  // multi_pack_index_bitmap contains information about the bitmap for the multi-pack-index.
+  BitmapInfo multi_pack_index_bitmap = 7;
+  // alternates contains information about alternate object directories.
+  AlternatesInfo alternates = 8;
+  // is_object_pool determines whether the repository is an object pool.
+  bool is_object_pool = 9;
+  // last_full_repack indicates the last date at which a full repack has been
+  // performed.
+  google.protobuf.Timestamp last_full_repack = 10;
+}
+
+// ObjectsSizeRequest is a request for the ObjectsSize RPC. The RPC is defined as a streaming RPC given that a client
+// may theoretically specify an unbounded number of revisions. Only the first request may have fields other than the
+// revisions set.
+message ObjectsSizeRequest {
+  // repository is the repository for which to determine the object size.
+  Repository repository = 1 [(target_repository)=true];
+  // revisions is the set of revisions that shall be used to compute the object size for. Supports normal revisions as
+  // well as pseudo-revisions like `--not`, `--all`, `--branches[=pattern]`, `--tags[=pattern]` and `--glob=pattern`.
+  // Please refer to the man pages gitrevisions(7) as well as git-rev-list(1) for more information.
+  repeated bytes revisions = 2;
+}
+
+// ObjectsSizeResponse is a response for the ObjectsSize RPC.
+message ObjectsSizeResponse {
+  // size is the total size of all objects reachable via the given set of revisions. The size is
+  // specified in bytes.
+  uint64 size = 1;
+}
+
+// ObjectFormatRequest is a request for the ObjectFormat RPC.
+message ObjectFormatRequest {
+  // repository is the repository for which to determine the object format.
+  Repository repository = 1 [(target_repository)=true];
+}
+
+// ObjectFormatResponse is a response for the ObjectFormat RPC.
+message ObjectFormatResponse {
+  // format is the object format that the repository uses.
+  ObjectFormat format = 1;
+}
+
+// FetchBundleRequest is a request for the FetchBundle RPC.
+message FetchBundleRequest {
+  // repository into which the reference shall be fetched.
+  Repository repository = 1 [(target_repository)=true];
+
+  // data is the bundle file stream.
+  bytes data = 2;
+
+  // update_head will update HEAD if there is a HEAD reference listed in the bundle
+  bool update_head = 3;
+}
+
+// FetchBundleResponse is a response for the FetchBundle RPC.
+message FetchBundleResponse {
+}
+
+// FetchRemoteRequest is a request for the FetchRemote RPC.
+message FetchRemoteRequest {
+  // repository is the repository to fetch the remote into. The storage_name
+  // and relative_path attributes must be provided.
+  Repository repository = 1 [(target_repository)=true];
+  // force determines if references should be force-updated in case they have
+  // diverged.
+  bool force = 3;
+  // no_tags determines whether tags should be fetched.
+  bool no_tags = 4;
+  // timeout specifies a timeout for the fetch.
+  int32 timeout = 5;
+  // ssh_key is an optional SSH key to use for fetching the remote.
+  string ssh_key = 6;
+  // known_hosts is the optional content of an SSH known-hosts file to use
+  // for the SSH session.
+  string known_hosts = 7;
+  reserved 8;
+  // no_prune will the fetch to not prune remote references which do not exist
+  // in the remote repository anymore.
+  bool no_prune = 9;
+  // remote_params specifies the remote repository which should be fetched
+  // from.
+  Remote remote_params = 10;
+  // check_tags_changed defines whether to check if any tags were modified,
+  // returning the result in the tags_changed field of FetchRemoteResponse.
+  bool check_tags_changed = 11;
+
+  reserved 2;
+  reserved "remote";
+}
+
+// FetchRemoteResponse is a response for the FetchRemote RPC.
+message FetchRemoteResponse {
+  // tags_changed is set based to true if tags were changed or cannot be determined
+  // and false when no tags were change.
+  bool tags_changed = 1;
+  // repo_changed is set to true if the repo was changed.
+  bool repo_changed = 2;
+}
+
+// CreateRepositoryRequest is a request for the CreateRepository RPC.
+message CreateRepositoryRequest {
+  // repository represents the repo to create. The storage_name and relative_path attributes must be provided.
+  Repository repository = 1 [(target_repository)=true];
+  // default_branch is the branch name to set as the default branch of the newly created
+  // repository. Note, this will be treated as the branch name and not a
+  // fully qualified reference.
+  bytes default_branch = 2;
+  // object_format is the object format the repository should be created with. Note that this is
+  // experimental and should not be used by callers yet. It is mostly intended for internal testing
+  // purposes in Gitaly right now.
+  ObjectFormat object_format = 3;
+}
+
+// CreateRepositoryResponse is a response for the CreateRepository RPC. An empty
+// response denotes a successful request.
+message CreateRepositoryResponse {
+}
+
+// GetArchiveRequest is a request for the GetArchive RPC.
+message GetArchiveRequest {
+  // Format is the format which the archive should be packaged in.
+  enum Format {
+    // ZIP
+    ZIP = 0; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX ENUM_FIELD_NAMES_ZERO_VALUE_END_WITH
+    // TAR
+    TAR = 1; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+    // TAR_GZ
+    TAR_GZ = 2; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+    // TAR_BZ2
+    TAR_BZ2 = 3; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+  }
+
+  // repository is the repo to archive. The storage_name and relative_path attributes must be provided.
+  Repository repository = 1 [(target_repository)=true];
+  // commit_id is the commit at which to perform the archive.
+  string commit_id = 2;
+  // prefix is an optional prefix to add to paths in the archive.
+  string prefix = 3;
+  // format is the archive format to stream in the response.
+  Format format = 4;
+  // path is the subdirectory of the repo to archive. Provide "." for the entire repo.
+  bytes path = 5;
+  // exclude is a set of paths to exclude from the archive. The paths must exist in the
+  // tree of the provided commit_id.
+  repeated bytes exclude = 6; // protolint:disable:this REPEATED_FIELD_NAMES_PLURALIZED
+  // elide_path whether to elide subdirectories. If it is true and `path` refers
+  // to a subdirectory, that subdirectory will be elided from archive entries.
+  // For example, if `dir` contains `README.md`, with `elide_path = false` the
+  // corresponding entry will be `dir/README.md`; with `elide_path = true`, the
+  // entry will be `README.md`. `elide_path` has no effect if `path` refers to the
+  // repository root. `elide_path = true` is not supported if `path` refers to a file.
+  bool elide_path = 7;
+  // include_lfs_blobs controls whether Git LFS Objects are included in the archive.
+  bool include_lfs_blobs = 8;
+}
+
+// GetArchiveResponse is a response for the GetArchive RPC.
+message GetArchiveResponse {
+  // data contains the archive in the requested format.
+  bytes data = 1;
+}
+
+// HasLocalBranchesRequest is a request for the HasLocalBranches RPC.
+message HasLocalBranchesRequest {
+  // repository is the repo to check. The storage_name and relative_path attributes must be provided.
+  Repository repository = 1 [(target_repository)=true];
+}
+
+// HasLocalBranchesResponse is a response for the HasLocalBranches RPC.
+message HasLocalBranchesResponse {
+  // value indicates whether branches exist in the repo.
+  bool value = 1;
+}
+
+// FetchSourceBranchRequest is a request for the FetchSourceBranch RPC.
+message FetchSourceBranchRequest {
+  // repository into which the reference shall be fetched. After a successful
+  // call, it should contain the target reference which points to the same
+  // commit as the source repository's source branch.
+  Repository repository = 1 [(target_repository)=true];
+  // source_repository is the repository from which to fetch the source branch from.
+  Repository source_repository = 2;
+  // source_branch is the name of the branch in the source repository which should be fetched.
+  bytes source_branch = 3;
+  // target_ref is the name of the reference which shall be newly created in the target
+  // repository.
+  bytes target_ref = 4;
+  // expected_target_old_oid is the object ID to which target_ref is expected to point.
+  // This is an optional safety guard to avoid races when target_ref has been
+  // concurrently updated.
+  string expected_target_old_oid = 5;
+}
+
+// FetchSourceBranchResponse is a response for the FetchSourceBranch RPC.
+message FetchSourceBranchResponse {
+  // result denotes if the source branch was successfully fetched into the target
+  // repository. It is false if resolving the remote reference or fetching it failed.
+  bool result = 1;
+}
+
+// FsckRequest is a request for the Fsck RPC.
+message FsckRequest {
+  // repository is the repository that shall be checked for consistency.
+  Repository repository = 1 [(target_repository)=true];
+}
+
+// FsckResponse is a response for the Fsck RPC.
+message FsckResponse {
+  // error contains both stdout and stderr of git-fsck(1) in case it returned an error.
+  bytes error = 1;
+}
+
+// WriteRefRequest is a request for the WriteRef RPC.
+message WriteRefRequest {
+  // repository is the repo in which to write a ref. The storage_name and relative_path
+  // attributes must be provided.
+  Repository repository = 1 [(target_repository)=true];
+  // ref is the ref to create or update. It should be a fully-resolved value like refs/heads/main.
+  bytes ref = 2;
+  // revision is the new value that the ref should point to.
+  bytes revision = 3;
+  // old_revision is the previous value of the ref, used to prevent race conditions.
+  // If an all-zero object ID is provided, the ref will only be updated if it did not
+  // previously exist.
+  bytes old_revision = 4;
+  // This was previously a no-op boolean for the user to indicate if the write
+  // should be forced.
+  reserved 5;
+  reserved "force";
+  // This used to be a boolean indicating whether or not to shell out or use
+  // the rugged implementation
+  reserved 6;
+}
+
+// WriteRefResponse is a response for the WriteRef RPC.
+message WriteRefResponse {
+  // This used to contain an error message. Since we're shelling out
+  // all exceptions are wrapped in GRPC errors.
+  reserved 1;
+}
+
+// FindMergeBaseRequest is a request for the FindMergeBase RPC.
+message FindMergeBaseRequest {
+  // repository is the repo to find the merge base in. The storage_name and
+  // relative_path attributes must be provided.
+  Repository repository = 1 [(target_repository)=true];
+  // revisions is the revisions to find the merge base for.
+  // We use a repeated field because rugged supports finding a base
+  // for more than 2 revisions, so if we needed that in the future we don't
+  // need to change the protocol.
+  repeated bytes revisions = 2;
+}
+
+// FindMergeBaseResponse is a response for the FindMergeBase RPC.
+message FindMergeBaseResponse {
+  // base is the commit ID of the best ancestor between the provided revisions.
+  string base = 1;
+}
+
+// CreateForkRequest is a request for the CreateFork RPC.
+message CreateForkRequest {
+  // repository is the repository that shall be created.
+  Repository repository = 1 [(target_repository)=true];
+  // source_repository is the repository that shall be forked.
+  //
+  // Note that the source repository is intentionally not marked as an additional repository that is
+  // to be rewritten by Praefect. This is because Gitaly will use the source repository to perform a
+  // gRPC call, which must use the original non-rewritten repository.
+  Repository source_repository = 2;
+  // revision to create the fork from. If set, the resulting fork will only have a single branch
+  // that matches the upstream revision. This revision will be the default branch of the repository.
+  // This field should be set to the unqualified revision, not the full reference name.
+  bytes revision = 3;
+}
+
+// CreateForkResponse is a response for the CreateFork RPC.
+message CreateForkResponse {
+}
+
+// CreateRepositoryFromURLRequest is a request for the CreateRepositoryFromURL RPC.
+message CreateRepositoryFromURLRequest {
+  // repository represents where the repo should be created. The storage_name and
+  // relative_path attributes must be provided.
+  Repository repository = 1 [(target_repository)=true];
+  // url is the URL of the existing Git repository.
+  string url = 2;
+  // http_authorization_header is the HTTP header which can be added to
+  // the request in order to authenticate against the repository.
+  string http_authorization_header = 4;
+  // mirror defines whether to clone with `--mirror` flag or `--bare`. The default
+  // value `false` will cause us to use `--bare`, which results in a clone that
+  // contains only branches (`refs/heads/`) and tags (`refs/tags/`) of the remote
+  // repository. If set to `true`, create a complete mirror-clone which maps all
+  // remote references into the local repository.
+  bool mirror = 5;
+  // resolved_address holds the resolved IP address of the remote_url. This is
+  // used to avoid DNS rebinding by mapping the url to the resolved address.
+  // Only IPv4 dotted decimal ("192.0.2.1"), IPv6 ("2001:db8::68"), or IPv4-mapped
+  // IPv6 ("::ffff:192.0.2.1") forms are supported.
+  // Works with HTTP/HTTPS/Git/SSH protocols.
+  // Optional.
+  string resolved_address = 6;
+
+  // HttpHost has been removed in favor of ResolvedAddress.
+  reserved 3;
+  reserved "http_host";
+}
+
+// CreateRepositoryFromURLResponse is a response for the CreateRepositoryFromURL RPC.
+message CreateRepositoryFromURLResponse {
+}
+
+// CreateRepositoryFromURLError is an error that will be returned by the CreateRepositoryFromURL RPC under specific error
+// CreateRepositoryFromURLError.
+message CreateRepositoryFromURLError {
+  oneof error {
+    // remote_not_found indicates that the remote repository was not found.
+    RemoteNotFoundError remote_not_found = 1;
+  }
+}
+
+// CreateBundleRequest is a request for the CreateBundle RPC.
+message CreateBundleRequest {
+  // repository is the repository to create a bundle from. The storage_name and
+  // relative_path attributes must be provided.
+  Repository repository = 1 [(target_repository)=true];
+}
+
+// CreateBundleResponse is a response for the CreateBundle RPC.
+message CreateBundleResponse {
+  // data contains the content of the created bundle.
+  bytes data = 1;
+}
+
+// CreateBundleFromRefListRequest is a request for the CreateBundleFromRefList RPC.
+message CreateBundleFromRefListRequest {
+  // repository is the repository that the bundle is created from.
+  Repository repository = 1 [(target_repository)=true];
+
+  // patterns contains all patterns which shall be bundled. Patterns should be
+  // in the format accepted by git-rev-list(1). Patterns which don't match any
+  // reference will be silently ignored.
+  repeated bytes patterns = 2;
+}
+
+// CreateBundleFromRefListResponse is a response for the CreateBundleFromRefList RPC.
+message CreateBundleFromRefListResponse {
+  // data contains the content of the created bundle.
+  bytes data = 1;
+}
+
+// GenerateBundleURIRequest is a request for the GenerateBundleURI RPC.
+message GenerateBundleURIRequest {
+  // repository is the repository that the bundle is created for.
+  Repository repository = 1 [(target_repository)=true];
+}
+
+// GenerateBundleURIResponse is a response for the GenerateBundleURI RPC.
+message GenerateBundleURIResponse {
+}
+
+// GetConfigRequest is a request for the GetConfig RPC.
+message GetConfigRequest {
+  // repository is the repository from which the configuration should be read
+  // from.
+  Repository repository = 1 [(target_repository)=true];
+}
+
+// GetConfigResponse is a response for the GetConfig RPC.
+message GetConfigResponse {
+  // data contains contents of the gitconfig.
+  bytes data = 1;
+}
+
+// RestoreCustomHooksRequest ...
+message RestoreCustomHooksRequest {
+  // repository ...
+  Repository repository = 1 [(target_repository)=true];
+  // data ...
+  bytes data = 2;
+}
+
+// SetCustomHooksRequest is a request for the SetCustomHooks RPC.
+message SetCustomHooksRequest {
+  // repository is the repo to set the custom hooks in. The storage_name and relative_path
+  // attributes must be provided. The repository can be omitted in subsequent requests.
+  Repository repository = 1 [(target_repository)=true];
+  // data is a tarball containing a `custom_hooks` directory.
+  bytes data = 2;
+}
+
+// RestoreCustomHooksResponse ...
+message RestoreCustomHooksResponse {
+}
+
+// SetCustomHooksResponse is a response for the SetCustomHooks RPC.
+message SetCustomHooksResponse {
+}
+
+// BackupCustomHooksRequest ...
+message BackupCustomHooksRequest {
+  // repository ...
+  Repository repository = 1 [(target_repository)=true];
+}
+
+// GetCustomHooksRequest is a request for the GetCustomHooks RPC.
+message GetCustomHooksRequest {
+  // repository is the repo to retrieve custom hooks from. The storage_name and relative_path
+  // attributes must be provided.
+  Repository repository = 1 [(target_repository)=true];
+}
+
+// BackupCustomHooksResponse ...
+message BackupCustomHooksResponse {
+  // data ...
+  bytes data = 1;
+}
+
+// GetCustomHooksResponse is a response for the GetCustomHooks RPC.
+message GetCustomHooksResponse {
+  // data is the tarball containing the `custom_hooks` directory.
+  bytes data = 1;
+}
+
+// CreateRepositoryFromBundleRequest is a request for the CreateRepositoryFromBundle RPC.
+message CreateRepositoryFromBundleRequest {
+  // repository is the repository to be created from the Git bundle. Repository should only be
+  // present in the first message of the stream.
+  Repository repository = 1 [(target_repository)=true];
+  // data contains bytes of the Git bundle file being streamed.
+  bytes data = 2;
+}
+
+// CreateRepositoryFromBundleResponse is a response for the CreateRepositoryFromBundle RPC.
+message CreateRepositoryFromBundleResponse {
+}
+
+// FindLicenseRequest asks to detect the license for the given repository.
+message FindLicenseRequest {
+  // repository is repository where to detect the license.
+  Repository repository = 1 [(target_repository)=true];
+}
+
+// FindLicenseResponse contains the result of detecting the license used in the repository.
+// If there is nothing that looks like a license file, the empty response is returned.
+// If there is something that looks like a license, but that license can't be found in the
+// list of known licenses, we return a pre-defined response with "Other" license.
+message FindLicenseResponse {
+  // license_short_name is the license unique SPDX identifier or a short name.
+  // It is always returned lower-cased.
+  string license_short_name = 1;
+  // license_name is the license full name.
+  string license_name = 2;
+  // license_url is a URL to the license on the internet.
+  string license_url = 3;
+  // license_path is a path to the file that contains the text of the license.
+  // When a LICENSE file is found containing the filename of another file,
+  // that filename will be returned, for example "mit.txt".
+  string license_path = 4;
+  // license_nickname is a shortened full name for better readability.
+  // It exists only for a small set of licenses and an empty value is returned in most cases.
+  string license_nickname = 5;
+}
+
+// GetInfoAttributesRequest ...
+message GetInfoAttributesRequest {
+  // repository ...
+  Repository repository = 1 [(target_repository)=true];
+}
+
+// GetInfoAttributesResponse ...
+message GetInfoAttributesResponse {
+  // attributes ...
+  bytes attributes = 1;
+}
+
+// CalculateChecksumRequest is a request for the CalculateChecksum RPC.
+message CalculateChecksumRequest {
+  // repository is the repo to calculate the checksum for. The storage_name and relative_path
+  // attributes must be provided.
+  Repository repository = 1 [(target_repository)=true];
+}
+
+// CalculateChecksumResponse is a response for the CalculateChecksum RPC.
+message CalculateChecksumResponse {
+  // checksum is the checksum of the repo's references.
+  string checksum = 1;
+}
+
+// GetSnapshotRequest is a request for the GetSnapshot RPC.
+message GetSnapshotRequest {
+  // repository is the repository to snapshot. The storage_name and relative_path
+  // attributes must be provided.
+  Repository repository = 1 [(target_repository)=true];
+}
+
+// GetSnapshotResponse is a response for the GetSnapshot RPC.
+message GetSnapshotResponse {
+  // data is the snapshot of the repo compressed as a TAR archive.
+  bytes data = 1;
+}
+
+// CreateRepositoryFromSnapshotRequest is a request for the CreateRepositoryFromSnapshot RPC.
+message CreateRepositoryFromSnapshotRequest {
+  // repository indicates where the new repo should be created. The storage_name and
+  // relative_path attributes must be provided.
+  Repository repository = 1 [(target_repository)=true];
+  // http_url is the full URL of the location of the snapshot TAR.
+  string http_url = 2;
+  // http_auth is the value of the Authorization header to send to http_url.
+  string http_auth = 3;
+  // resolved_address holds the resolved IP address of the remote_url. This is
+  // used to avoid DNS rebinding by mapping the url to the resolved address.
+  // Only IPv4 dotted decimal ("192.0.2.1"), IPv6 ("2001:db8::68"), or IPv4-mapped
+  // IPv6 ("::ffff:192.0.2.1") forms are supported.
+  // Works with HTTP/HTTPS protocols.
+  // Optional.
+  string resolved_address = 5;
+
+  // http_host has been removed in favor of ResolvedAddress.
+  reserved 4;
+  reserved "http_host";
+}
+
+// CreateRepositoryFromSnapshotResponse is a response for the CreateRepositoryFromSnapshot RPC.
+message CreateRepositoryFromSnapshotResponse {
+}
+
+// GetRawChangesRequest is a request for the GetRawChanges RPC.
+message GetRawChangesRequest {
+  // repository is the repository to run the diff in. The storage_name and
+  // relative_path attributes must be provided.
+  Repository repository = 1 [(target_repository)=true];
+  // from_revision is the Git revision to start the diff at.
+  string from_revision = 2;
+  // to_revision is the Git revision to end the diff at.
+  string to_revision = 3;
+}
+
+// GetRawChangesResponse is a response for the GetRawChanges RPC.
+message GetRawChangesResponse {
+  // RawChange represents the metadata for a single change between the two
+  // revisions.
+  message RawChange {
+    // Operation is the change that occurred on the file. Consult the man pages
+    // for git-diff(1) for additional detail on the semantics of each operation.
+    enum Operation {
+      // UNKNOWN
+      UNKNOWN = 0; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX ENUM_FIELD_NAMES_ZERO_VALUE_END_WITH
+      // ADDED
+      ADDED = 1; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+      // COPIED
+      COPIED = 2; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+      // DELETED
+      DELETED = 3; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+      // MODIFIED
+      MODIFIED = 4; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+      // RENAMED
+      RENAMED = 5; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+      // TYPE_CHANGED
+      TYPE_CHANGED = 6; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+    }
+
+    // blob_id is the OID of the file that was changed.
+    string blob_id = 1;
+    // size is the blob size in bytes.
+    int64 size = 2;
+
+    // This used to be a string that is now represented by the field 9 as byte array.
+    reserved 3;
+    reserved "new_path";
+    // This used to be a string that is now represented by the field 10 as byte array.
+    reserved 4;
+    reserved "old_path";
+
+    // operation is the change that occurred on the file.
+    Operation operation = 5;
+    // raw_operation has been deprecated as it was never populated.
+    reserved 6;
+    reserved "raw_operation";
+    // old_mode is the previous mode of the file. This may be equal to new_mode.
+    int32 old_mode = 7;
+    // new_mode is the current mode of the file. This may be equal to old_mode.
+    int32 new_mode = 8;
+
+    // new_path_bytes is the new file path. This may be equal to old_path_bytes.
+    bytes new_path_bytes = 9;
+    // old_path_bytes is the old file path. This may be equal to new_path_bytes.
+    bytes old_path_bytes = 10;
+  }
+
+  // raw_changes is the set of changes between the two revisions.
+  repeated RawChange raw_changes = 1;
+}
+
+// SearchFilesByNameRequest is a request for the SearchFilesByName RPC.
+message SearchFilesByNameRequest {
+  // repository is the repo to execute the search in. The storage_name and
+  // relative_path attributes must be provided.
+  Repository repository = 1 [(target_repository)=true];
+  // query is the search query.
+  string query = 2;
+  // ref is the Git reference whose tree should be searched.
+  bytes ref = 3;
+  // filter is a regular expression used to filter the result set before it is
+  // transmitted. It is parsed using Go's `regexp` package, which is closely related
+  // to PCRE, excluding backreferences, atomic/possesive operators, and some other
+  // features. It has a maximum length of 1000 bytes.
+  string filter = 4;
+  // limit the number of returned files. Gitaly does not enforce a limit by default.
+  // Clients should always set a value for this field. limit = 0 means unlimited files.
+  uint32 limit = 5;
+  // offset says to skip that many files before beginning to return files.
+  // offset = 0 means starting to return files from beginning.
+  uint32 offset = 6;
+}
+
+// SearchFilesByNameResponse is a response for the SearchFilesByName RPC.
+message SearchFilesByNameResponse {
+  // files contains the paths of files that have been found to match the query.
+  repeated bytes files = 1;
+}
+
+// SearchFilesByContentRequest is a request for the SearchFilesByContent RPC.
+message SearchFilesByContentRequest {
+  // repository is the repo to search. The storage_name and relative_path attributes must be provided.
+  Repository repository = 1 [(target_repository)=true];
+  // query is the grep pattern to use. Queries are case-insensitive and are compatible
+  // with Perl regexp syntax.
+  string query = 2;
+  // ref is the reference to limit the search scope by, for example a commit or
+  // branch name.
+  bytes ref = 3;
+  // chunked_response is deprecated as it was never used.
+  reserved 4;
+  reserved "chunked_response";
+}
+
+// SearchFilesByContentResponse is a response for the SearchFilesByContent RPC.
+message SearchFilesByContentResponse {
+  // matches is deprecated as it was never used.
+  reserved 1;
+  reserved "matches";
+  // match_data contains the results of the search. Data is streamed in chunks, where
+  // each chunk is an individual result.
+  bytes match_data = 2;
+  // end_of_match indicates the end of an individual match results. Additional results
+  // may follow in subsequent gRPC messages.
+  bool end_of_match = 3;
+}
+
+// Remote represents a git remote repository.
+message Remote {
+  // url is the URL of the remote repository.
+  string url = 1;
+  // http_authorization_header is the HTTP header which should be added to
+  // the request in order to authenticate against the repository.
+  string http_authorization_header = 3;
+  // mirror_refmaps contains the refspecs which shall be fetched. Some special
+  // refspecs are accepted:
+  //
+  // - "all_refs" gets translated to "+refs/*:refs/*", which mirrors all
+  //   references of the source repository.
+  // - "heads" gets translated to "+refs/heads/*:refs/heads/*", which mirrors
+  //   all branches of the source repository.
+  // - "tags" gets translated to "+refs/tags/*:refs/tags/*", which mirrors all
+  //   tags of the source repository.
+  //
+  // If no refspecs are given, this defaults to "all_refs".
+  repeated string mirror_refmaps = 4;
+  // resolved_address holds the resolved IP address of the remote_url. This is
+  // used to avoid DNS rebinding by mapping the url to the resolved address.
+  // Only IPv4 dotted decimal ("192.0.2.1"), IPv6 ("2001:db8::68"), or IPv4-mapped
+  // IPv6 ("::ffff:192.0.2.1") forms are supported.
+  // Works with HTTP/HTTPS/Git/SSH protocols.
+  // Optional.
+  string resolved_address = 6;
+
+  // Previously, it was possible to specify a remote name. This was quite a
+  // dangerous field to set though: the name was simply used to create an ad-hoc
+  // remote which got deleted afterwards again. So unexpectedly, the remote
+  // isn't retained. And second, if the user chose the name of an existing
+  // remote, then it would've been deleted after the call. So in effect, the
+  // field was at best confusing and useless and at worst actively harmful.
+  reserved 2;
+  reserved "name";
+  // HttpHost has been removed in favor of ResolvedAddress.
+  reserved 5;
+  reserved "http_host";
+}
+
+// GetObjectDirectorySizeRequest is a request for the GetObjectDirectorySize RPC.
+message GetObjectDirectorySizeRequest {
+  // repository is the repo to query. The storage_name and relative_path attributes
+  // must be provided.
+  Repository repository = 1 [(target_repository)=true];
+}
+
+// GetObjectDirectorySizeResponse is a response for the GetObjectDirectorySize RPC.
+message GetObjectDirectorySizeResponse {
+  // size is the object directory size in kibibytes.
+  int64 size = 1;
+}
+
+// RemoveRepositoryRequest is a request for the RemoveRepository RPC.
+message RemoveRepositoryRequest {
+  // repository is the repo to remove. The storage_name and relative_path attributes
+  // must be provided.
+  Repository repository = 1 [(target_repository)=true];
+}
+
+// RemoveRepositoryResponse is a response for the RemoveRepository RPC.
+message RemoveRepositoryResponse {
+}
+
+// ReplicateRepositoryRequest is a request for the ReplicateRepository RPC.
+message ReplicateRepositoryRequest {
+  // repository is the target repository that the RPC replicates to.
+  Repository repository = 1 [(target_repository)=true];
+  // source is the source repository that the RPC replicates from. This repository can sit on a
+  // different storage node. The information for how to connect to this storage node needs to be
+  // injected into the gRPC context by the caller by setting the `gitaly-servers` metadata.
+  Repository source = 2;
+}
+
+// ReplicateRepositoryResponse is a response for the ReplicateRepository RPC.
+message ReplicateRepositoryResponse{
+}
+
+// OptimizeRepositoryRequest is a request for the OptimizeRepository RPC.
+message OptimizeRepositoryRequest {
+  // Strategy determines how the repository shall be optimized.
+  enum Strategy {
+    // STRATEGY_UNSPECIFIED indicates that the strategy has not been explicitly set by the
+    // caller. The default will be STRATEGY_HEURISTICAL in that case.
+    STRATEGY_UNSPECIFIED = 0;
+    // STRATEGY_HEURISTICAL performs heuristical optimizations in the repository. The server will
+    // decide on a set of heuristics which parts need optimization and which ones don't to avoid
+    // performing unnecessary optimization tasks.
+    STRATEGY_HEURISTICAL = 1;
+    // STRATEGY_EAGER performs eager optimizations in the repository. The server will optimize all
+    // data structures regardless of whether they are well-optimized already.
+    STRATEGY_EAGER = 2;
+
+    // STRATEGY_OFFLOADING selectively moves repository objects to secondary storage.
+    STRATEGY_OFFLOADING = 3;
+
+    // STRATEGY_REHYDRATION selectively revert a repository from offloading state to all local state.
+    STRATEGY_REHYDRATION = 4;
+  }
+
+  // repository is the repository that should be optimized.
+  Repository repository = 1 [(target_repository)=true];
+  // strategy is the strategy that determines which parts of the repository shall be optimized.
+  Strategy strategy = 2;
+}
+
+// OptimizeRepositoryResponse is a response for the OptimizeRepository RPC.
+message OptimizeRepositoryResponse {
+}
+
+// PruneUnreachableObjectsRequest is a request for the PruneUnreachableObjects
+// RPC call.
+message PruneUnreachableObjectsRequest {
+  // repository is the repo to prune. The storage_name and relative_path
+  // attributes must be provided.
+  Repository repository = 1 [(target_repository)=true];
+}
+
+// PruneUnreachableObjectsResponse is a response for the
+// PruneUnreachableObjects RPC call.
+message PruneUnreachableObjectsResponse {
+}
+
+// BackupRepositoryRequest is a request for the BackupRepository RPC.
+message BackupRepositoryRequest {
+  // repository is the repository to be backed up.
+  Repository repository = 1 [(target_repository)=true];
+  // vanity_repository is used to determine the backup path.
+  Repository vanity_repository = 2;
+  // backup_id is the label used to identify this backup when restoring.
+  string backup_id = 3;
+  // incremental controls whether an incremental backup should be performed. An incremental
+  // backup will attempt to locate a previous backup of this repository to base itself off.
+  bool incremental = 4;
+}
+
+// BackupRepositoryResponse is a response for the BackupRepository RPC.
+message BackupRepositoryResponse {
+  // SkippedError is returned when the repository backup has been skipped.
+  message SkippedError {
+  }
+}
+
+// RestoreRepositoryRequest is a request for the RestoreRepository RPC.
+message RestoreRepositoryRequest {
+  // repository is the repository to be restored.
+  Repository repository = 1 [(target_repository)=true];
+  // vanity_repository is used to determine the backup path.
+  Repository vanity_repository = 2;
+  // backup_id is the label used to identify the backup to restore from. If
+  // empty, the latest available backup is used.
+  string backup_id = 3;
+  // always_create will force the repository to exist even if no bundle is
+  // found. See https://gitlab.com/gitlab-org/gitlab/-/issues/357044
+  bool always_create = 4;
+}
+
+// RestoreRepositoryResponse is a response for the RestoreRepository RPC.
+message RestoreRepositoryResponse {
+  // SkippedError is returned when the repository restore has been skipped.
+  message SkippedError {
+  }
+}
+
+// GetFileAttributesRequest is a request for the GetFileAttributes RPC.
+message GetFileAttributesRequest {
+  // repository is the repository the file attributes shall be computed in.
+  Repository repository = 1 [(target_repository)=true];
+  // revision is the revision where the file attributes shall be computed in.
+  bytes revision = 2;
+  // attributes are the attributes that will be queried for.
+  repeated string attributes = 3;
+  // paths are the file paths that will be queried for.
+  repeated string paths = 4;
+}
+
+// GetFileAttributesResponse is a response for the GetFileAttributes RPC.
+message GetFileAttributesResponse {
+  // AttributeInfo is a specified git attribute for a given path.
+  message AttributeInfo {
+    // path is the file path for the current attribute value.
+    string path = 1;
+    // attribute is the name of the attribute.
+    string attribute = 2;
+    // value is the current value of the attribute.
+    // "set" is used when the attribute is true, and "unset" when it's false.
+    // See gitattributes(5) and git-check-attr(1) for more info.
+    string value = 3;
+  }
+  // attribute_infos is the list of attributes that matches the given GetFileAttributesRequest
+  repeated AttributeInfo attribute_infos = 1; // protolint:disable:this REPEATED_FIELD_NAMES_PLURALIZED
+}
+
+// FastExportRequest is a request for the FastExport RPC
+message FastExportRequest {
+  // repository is the repository to generate export data for.
+  Repository repository = 1 [(target_repository)=true];
+}
+
+// FastExportResponse is a response for the FastExport RPC
+message FastExportResponse {
+  // data contains the content of the export of the repository.
+  bytes data = 1;
+}
+
+// MigrateReferenceBackendRequest is a request for the MigrateReferenceBackend RPC.
+message MigrateReferenceBackendRequest {
+  // ReferenceBackend denotes the type of backend used to store references.
+  enum ReferenceBackend {
+    // REFERENCE_BACKEND_UNSPECIFIED is the default value and should never be set.
+    REFERENCE_BACKEND_UNSPECIFIED = 0;
+    // REFERENCE_BACKEND_FILES is the traditional backend built using files/directories.
+    REFERENCE_BACKEND_FILES = 1;
+    // REFERENCE_BACKEND_REFTABLE is the new backend using customized binary file format.
+    REFERENCE_BACKEND_REFTABLE = 2;
+  };
+
+  // repository is the repository to run migrations on.
+  Repository repository = 1 [(target_repository)=true];
+  // target_reference_backend is the backend to migrate to.
+  ReferenceBackend target_reference_backend = 2;
+}
+
+// MigrateReferenceBackendResponse is a response for the MigrateReferenceBackend RPC.
+message MigrateReferenceBackendResponse {
+  // time is the amount of time the migrations took.
+  google.protobuf.Duration time = 1;
+}

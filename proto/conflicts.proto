@@ -1,0 +1,137 @@
+syntax = "proto3";
+
+package gitaly;
+
+import "google/protobuf/timestamp.proto";
+import "lint.proto";
+import "shared.proto";
+
+option go_package = "gitlab.com/gitlab-org/gitaly/v18/proto/go/gitalypb";
+
+// ConflictsService is a service which provides RPCs to interact with conflicts
+// resulting from a merge.
+service ConflictsService {
+
+  // ListConflictFiles returns all conflicting files which result from a merge
+  // of two specified commit objects.
+  rpc ListConflictFiles(ListConflictFilesRequest) returns (stream ListConflictFilesResponse) {
+    option (op_type) = {
+      op: ACCESSOR
+    };
+  }
+
+  // ResolveConflicts tries to resolve a conflicting merge with a set of
+  // user-provided merge resolutions. If resolving the conflict succeeds, the
+  // result will be a new merge commit.
+  rpc ResolveConflicts(stream ResolveConflictsRequest) returns (ResolveConflictsResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+}
+
+// ListConflictFilesRequest is the request for the ListConflictFilesRequest rpc.
+message ListConflictFilesRequest {
+  // repository is the repository for which we want to list the conflicted files.
+  Repository repository = 1 [(target_repository)=true];
+  // our_commit_oid is the tree-ish OID to merge into.
+  string our_commit_oid = 2;
+  // their_commit_oid is the tree-ish OID to merge from.
+  string their_commit_oid = 3;
+  // allow_tree_conflicts will not cause the request to fail in case there are
+  // tree conflicts. If set to true, then responses may contain conflict files
+  // where some of the paths are unset.
+  bool allow_tree_conflicts = 4;
+  // skip_content will skip the parsing and streaming of conflicted file's content.
+  // This can be useful when we only want to know if there is a conflict and which files
+  // are conflicted but don't care about the contents of the conflicted files.
+  bool skip_content = 5;
+}
+
+// ConflictFileHeader contains parsed conflicted file information from the `git-merge-tree(1)`
+// output for an individual file.
+message ConflictFileHeader {
+  reserved 1;
+  // commit_oid is the tree-ish revision being merged into.
+  string commit_oid = 2;
+  // their_path is the path of the conflicted file being merged from.
+  bytes their_path = 3;
+  // our_path is the path of the conflicted file being merged into.
+  bytes our_path = 4;
+  // our_mode is the mode of the conflicted file being merged into.
+  int32 our_mode = 5;
+  // ancestor_path is path of the conflicted file for the merge base.
+  bytes ancestor_path = 6;
+}
+
+// ConflictFile contains conflicted file information.
+message ConflictFile {
+  oneof conflict_file_payload {
+    // header contains the header information about a conflicted file.
+    ConflictFileHeader header = 1;
+    // content is the content data from the conflicted file. The file data may be broken into chunks
+    // and sent in the stream following a file header. if skip_content is set in the request,
+    // conflicted file content is not streamed.
+    bytes content = 2;
+  }
+}
+
+// ListConflictFilesResponse is the response for the ListConflicts RPC.
+message ListConflictFilesResponse {
+  // files is a list of conflicted file information being sent in the stream. This information
+  // contains conflicted file headers and optionally the conflicted file content.
+  repeated ConflictFile files = 1;
+}
+
+// ResolveConflictsRequestHeader is the first message that must be sent for
+// each ResolveConflicts call.
+message ResolveConflictsRequestHeader {
+  // repository is the repository in which conflicts shall be resolved and
+  // where SourceBranch shall be updated with the resolved conflict.
+  Repository repository = 1 [(gitaly.target_repository)=true];
+  // our_commit_oid is the OID of the commit representing the local commit.
+  string our_commit_oid = 2;
+  // target_repository is the repository from which TheirCommitOid shall be
+  // retrieved.
+  Repository target_repository = 3;
+  // their_commit_oid is the OID of the commit representing the remote commit
+  // which is to be merged into the local commit.
+  string their_commit_oid = 4;
+  // source_branch is the branch on which the new commit shall be created.
+  bytes source_branch = 5;
+  // target_branch identifies the branch which will be fetched from
+  // target_repository in case TheirCommitOid does not exist in Repository.
+  bytes target_branch = 6;
+  // commit_message is the message of the newly created merge commit.
+  bytes commit_message = 7;
+  // user is the user used as author and committer of the newly created merge
+  // commit.
+  User user = 8;
+  // timestamp is the optional timestamp to use for the commit as committer
+  // date. If it's not set, the current time will be used.
+  google.protobuf.Timestamp timestamp = 9;
+}
+
+// ResolveConflictsRequest is a request for the ResolveConflicts RPC.
+message ResolveConflictsRequest {
+  // RequestPayload is the payload part of the request. The first message sent
+  // must always be a ResolveConflictsRequestHeader, whereas all remaining
+  // requests must be FilesJson requests.
+  oneof resolve_conflicts_request_payload {
+    // header is the initial message specifying parameters of the RPC call.
+    ResolveConflictsRequestHeader header = 1;
+    // files_json is a JSON-encoded list of conflicts resolutions.
+    bytes files_json = 2;
+  }
+}
+
+// ResolveConflictsResponse is a response of the ResolveConflicts RPC. Conflict
+// resolution may have failed even if the RPC has returned OK. The user must
+// check ResolutionError to verify whether the merge commit was correctly
+// computed or not.
+message ResolveConflictsResponse {
+  // resolution_error contains a description of why conflict resolution has
+  // failed.
+  string resolution_error = 1;
+}

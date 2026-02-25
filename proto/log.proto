@@ -1,0 +1,137 @@
+syntax = "proto3";
+
+package gitaly;
+
+option go_package = "gitlab.com/gitlab-org/gitaly/v18/proto/go/gitalypb";
+
+// LogEntry is a single entry in a partition's write-ahead log.
+//
+// Schema for :
+// - `partition/<partition_id>/log/entry/<log_index>`.
+message LogEntry {
+  // ReferenceTransaction models a single reference transaction.
+  message ReferenceTransaction {
+    // Change models a single reference change.
+    message Change {
+      // reference_name is the fully qualified name of the reference
+      // to update.
+      bytes reference_name = 1;
+      // new_oid is the new oid to point the reference to. Deletions
+      // are denoted as the SHA1 or SHA256 zero OID depending on the
+      // hash type used in the repository.
+      bytes new_oid = 2;
+      // new_target is the new target reference that the reference will
+      // point to. This is used for symbolic reference updates such
+      // as the default branch update.
+      bytes new_target = 3;
+    }
+
+    // changes are the reference changes performed in this reference transaction.
+    repeated Change changes = 1;
+  }
+
+  // RepositoryDeletion models a repository deletion.
+  message RepositoryDeletion {
+  }
+
+  // Housekeeping models a housekeeping run. All of the operations are modeled by file system
+  // operations. This message is still kept around for conflict checking concurrent housekeeping
+  // runs.
+  message Housekeeping {
+    // PackRefs models a pack-refs housekeeping task.
+    message PackRefs {
+    }
+    // Offloading models a offloading task.
+    message Offloading {
+    }
+    // pack_refs signifies if the housekeeping run includes a pack-refs task.
+    PackRefs pack_refs = 1;
+    // offloading, when set, indicates this log entry contains a offloading task.
+    Offloading offloading = 2;
+  }
+  // relative_path is the relative path of the repository the changes in the
+  // log entry are targeting.
+  string relative_path = 1;
+  // reference_transactions contains the reference transactions this
+  // entry records. The logged reference updates have already passed
+  // through verification and are applied without any further checks.
+  // The reference transactions are applied in order.
+  repeated ReferenceTransaction reference_transactions = 2;
+  // repository_deletion, when set, indicates this log entry deletes the repository.
+  RepositoryDeletion repository_deletion = 6;
+  // housekeeping, when set, indicates this log entry contains a housekeeping task.
+  Housekeeping housekeeping = 9;
+  // Operation models a single operation to be performed.
+  message Operation {
+    // CreateHardLink creates a hard link. The existing inode metadata, including
+    // permissions, will be shared with all of the hard links to the same file.
+    message CreateHardLink {
+      // source_path is the relative path of the file the hard link should point to.
+      bytes source_path = 1;
+      // source_in_storage is set when the source path is relative to the storage
+      // root instead of the log entry.
+      bool source_in_storage = 2;
+      // destination_path is a relative path from the storage root to where the hard
+      // link should be created at.
+      bytes destination_path = 3;
+    }
+
+    // RemoveDirectoryEntry removes a directory or a file
+    // from the parent directory. When removing a directory,
+    // it must be empty.
+    message RemoveDirectoryEntry {
+      // path is the relative path of the directory entry to remove in the storage.
+      bytes path = 1;
+    }
+
+    // CreateDirectory creates a directory at a relative path.
+    message CreateDirectory {
+      // path is a relative path where to create the directory.
+      bytes path = 1;
+      // mode is the file mode to set on the created directory.
+      uint32 mode = 2;
+    }
+
+    // SetKey sets a key with a value in the key-value store.
+    message SetKey {
+      // key is the key to set.
+      bytes key = 1;
+      // value is the value to set for the key.
+      bytes value = 2;
+    }
+
+    // DeleteKey deletes a key from the key-value store.
+    message DeleteKey {
+      // key is the key to delete.
+      bytes key = 1;
+    }
+
+    oneof operation {
+      // create_hard_link creates a hard link in the storage.
+      CreateHardLink       create_hard_link       = 1;
+      // remove_directory_entry removes a directory entry from the storage.
+      RemoveDirectoryEntry remove_directory_entry = 2;
+      // create_directory creates a directory in the storage.
+      CreateDirectory      create_directory       = 3;
+      // set_key sets a key with a given value in the key-value store.
+      SetKey               set_key                = 4;
+      // delete_key deletes a given key from the key-value store.
+      DeleteKey            delete_key             = 5;
+    };
+  }
+
+  // operations is an ordered list of operations to run in order to apply
+  // this log entry.
+  repeated Operation operations = 10;
+
+}
+
+// LSN serializes a log sequence number. It's used for storing a partition's
+// applied LSN in the database.
+//
+// Schema for:
+// - `partition/<partition_id>/applied_lsn`
+message LSN {
+  // value is an LSN pointing to a position in the log.
+  uint64 value = 1;
+}

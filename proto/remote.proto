@@ -1,0 +1,153 @@
+syntax = "proto3";
+
+package gitaly;
+
+import "lint.proto";
+import "shared.proto";
+
+option go_package = "gitlab.com/gitlab-org/gitaly/v18/proto/go/gitalypb";
+
+// RemoteService is a service providing RPCs to interact with a remote
+// repository that is hosted on another Git server.
+service RemoteService {
+
+  // UpdateRemoteMirror compares the references in the target repository and its remote mirror
+  // repository. Any differences in the references are then addressed by pushing the differing
+  // references to the mirror. Created and modified references are updated, removed references are
+  // deleted from the mirror. UpdateRemoteMirror updates all tags. Branches are updated if they match
+  // the patterns specified in the requests.
+  rpc UpdateRemoteMirror(stream UpdateRemoteMirrorRequest) returns (UpdateRemoteMirrorResponse) {
+    option (op_type) = {
+        op: ACCESSOR
+      };
+  }
+
+  // FindRemoteRepository detects whether a repository exists at the given URI. This is done by
+  // asking git-ls-remote(1) to enumerate the remote's HEAD and then checking that we recognize it
+  // as a valid reference.
+  rpc FindRemoteRepository(FindRemoteRepositoryRequest) returns (FindRemoteRepositoryResponse) {
+    option (op_type) = {
+        op: ACCESSOR
+        scope_level: STORAGE
+      };
+  }
+
+  // FindRemoteRootRef tries to find the root reference of a remote
+  // repository. The root reference is the default branch as pointed to by
+  // the remotes HEAD reference. Returns an InvalidArgument error if the
+  // specified remote does not exist and a NotFound error in case no HEAD
+  // branch was found.
+  rpc FindRemoteRootRef(FindRemoteRootRefRequest) returns (FindRemoteRootRefResponse) {
+    option (op_type) = {
+        op: ACCESSOR
+      };
+  }
+}
+
+// UpdateRemoteMirrorRequest is a request for the UpdateRemoteMirror RPC.
+message UpdateRemoteMirrorRequest {
+  // Remote defines a remote repository that diverged references should be pushed to.
+  message Remote {
+    // url is the URL of the remote repository.
+    string url = 1;
+    // http_authorization_header is an optional HTTP header used for
+    // authenticating against the remote repository.
+    string http_authorization_header = 2;
+    // resolved_address holds the resolved IP address of the remote_url. This is
+    // used to avoid DNS rebinding by mapping the url to the resolved address.
+    // Only IPv4 dotted decimal ("192.0.2.1"), IPv6 ("2001:db8::68"), or IPv4-mapped
+    // IPv6 ("::ffff:192.0.2.1") forms are supported.
+    // Works with HTTP/HTTPS/Git/SSH protocols.
+    // Optional.
+    string resolved_address = 4;
+
+    // HttpHost has been removed in favor of ResolvedAddress.
+    reserved 3;
+    reserved "http_host";
+  }
+
+  // repository is the repository whose mirror repository to update.
+  Repository repository = 1 [(target_repository)=true];
+  // only_branches_matching contains patterns to match branches against. Only the
+  // matched branches are updated in the remote mirror. If no patterns are
+  // specified, all branches are updated. The patterns should only contain the
+  // branch name without the 'refs/heads/' prefix. "*" can be used as a
+  // wildcard to match anything. only_branches_matching can be streamed to the
+  // server over multiple messages. Optional.
+  repeated bytes only_branches_matching = 3; // protolint:disable:this REPEATED_FIELD_NAMES_PLURALIZED
+  // ssh_key is the SSH key to use for accessing to the mirror repository.
+  // Optional.
+  string ssh_key = 4;
+  // known_hosts specifies the identities used for strict host key checking.
+  // Optional.
+  string known_hosts = 5;
+  // keep_divergent_refs specifies whether or not to update diverged references
+  // in the mirror repository.
+  bool keep_divergent_refs = 6;
+  // remote contains parameters required to connect to the remote repository.
+  // This allows Gitaly to use an in-memory remote and does not require any
+  // on-disk remote configuration.
+  Remote remote = 7;
+
+  reserved 2;
+  reserved "ref_name";
+}
+
+// UpdateRemoteMirrorResponse is a response for the UpdateRemoteMirror RPC.
+message UpdateRemoteMirrorResponse {
+  // divergent_refs contains a list of references that had diverged in the
+  // mirror from the source repository.
+  repeated bytes divergent_refs = 1;
+}
+
+// FindRemoteRepositoryRequest is a request for the FindRemoteRepository RPC.
+message FindRemoteRepositoryRequest {
+  // remote is the remote repository being checked. Because this RPC is not executed within a
+  // repository, the remote parameter must specify a valid Git URL for the targeted repository.
+  string remote = 1;
+  // storage_name is used to redirect request to proper storage where it can be handled.
+  // As of now it doesn't matter what storage will be used, but it still must be a valid.
+  // For more details: https://gitlab.com/gitlab-org/gitaly/-/issues/2442
+  string storage_name = 2 [(storage)=true];
+}
+
+// FindRemoteRepositoryResponse is a response for the FindRemoteRepository RPC. This might throw a
+// GRPC Unavailable code to signal the request failure is transient.
+message FindRemoteRepositoryResponse {
+  // exists specifies if the remote repository exists.
+  bool exists = 1;
+}
+
+// FindRemoteRootRefRequest represents a request for the FindRemoteRootRef RPC.
+message FindRemoteRootRefRequest {
+  // repository is the repository in which the request shall be executed in. If
+  // a remote name is given, then this is the repository in which the remote
+  // will be looked up.
+  Repository repository = 1 [(target_repository)=true];
+  // remote_url specifies the remote repository URL which should be fetched from.
+  string remote_url = 3;
+  // http_authorization_header is the HTTP header which should be added to the
+  // request in order to authenticate against the repository.
+  string http_authorization_header = 4;
+  // resolved_address holds the resolved IP address of the remote_url. This is
+  // used to avoid DNS rebinding by mapping the url to the resolved address.
+  // Only IPv4 dotted decimal ("192.0.2.1"), IPv6 ("2001:db8::68"), or IPv4-mapped
+  // IPv6 ("::ffff:192.0.2.1") forms are supported.
+  // Works with HTTP/HTTPS/Git/SSH protocols.
+  // Optional.
+  string resolved_address = 6;
+
+  reserved 2;
+  reserved "remote";
+
+  // HttpHost has been removed in favor of ResolvedAddress.
+  reserved 5;
+  reserved "http_host";
+}
+
+// FindRemoteRootRefResponse represents the response for the FindRemoteRootRef
+// request.
+message FindRemoteRootRefResponse {
+  // ref is the name of the remote root reference.
+  string ref = 1;
+}

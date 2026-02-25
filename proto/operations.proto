@@ -1,0 +1,1172 @@
+syntax = "proto3";
+
+package gitaly;
+
+import "errors.proto";
+import "google/protobuf/timestamp.proto";
+import "lint.proto";
+import "shared.proto";
+
+option go_package = "gitlab.com/gitlab-org/gitaly/v18/proto/go/gitalypb";
+
+// OperationService provides an interface for performing mutating git
+// operations on a repository on behalf of a user. The user's operation is
+// treated as untrusted. Any reference update is thus checked against GitLab's
+// '/allowed' endpoint.
+service OperationService {
+
+  // UserCreateBranch creates a single branch in the context of a specific user. It executes
+  // hooks and contacts Rails to verify that the user is allowed to create the branch. The
+  // following known error conditions may happen:
+  //
+  // - `FailedPrecondition` if the Git revision provided in start_point can't be found or updated.
+  // - `InvalidArgument` if the commit ID resolved from the start_point can't be parsed.
+  // - `PermissionDenied` with an embedded `UserCreateBranchError` if any custom hooks return a
+  //    non-zero exit code.
+  rpc UserCreateBranch(UserCreateBranchRequest) returns (UserCreateBranchResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // UserUpdateBranch updates a branch to point to a new revision. It executes hooks and
+  // contacts Rails to verify that the user is allowed to update the branch. The following
+  // known error conditions may happen:
+  //
+  // - `InvalidArgument` if any of the request fields can't be validated.
+  // - `Internal` if the newrev or oldrev are invalid in the context of the repository.
+  // - `UserUpdateBranchResponse` with the `PreReceiveError` field set, if any custom hooks
+  //   return a non-zero exit code.
+  rpc UserUpdateBranch(UserUpdateBranchRequest) returns (UserUpdateBranchResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // UserDeleteBranch force-deletes a single branch in the context of a specific user. It executes
+  // hooks and contacts Rails to verify that the user is indeed allowed to delete that branch. The
+  // following known error conditions may happen:
+  //
+  // - Returns `InvalidArgument` in case either the branch name or user are not set.
+  // - Returns `FailedPrecondition` in case the branch does not exist.
+  // - Returns `OK` with a `PreReceiveError` in case custom hooks refused the update. If the
+  //   `gitaly_user_delete_branch_structured_errors` feature flag is enabled this error case will
+  //   instead return `PermissionDenied` with either a `CustomHook` or AccessCheck` structured
+  //   error.
+  // - Returns `FailedPrecondition` in case updating the reference fails because
+  //   of a concurrent write to the same reference. If the
+  //   `gitaly_user_delete_branch_structured_errors` feature flag is set this error case will
+  //   instead return `FailedPrecondition` with a `ReferenceUpdate` structured error.
+  rpc UserDeleteBranch(UserDeleteBranchRequest) returns (UserDeleteBranchResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // UserCreateTag creates a new tag. This RPC knows to create both lightweight and annotated tags
+  // depending on whether a message is set.
+  rpc UserCreateTag(UserCreateTagRequest) returns (UserCreateTagResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // UserDeleteTag deletes an existing tag. It executes hooks and contacts Rails to verify that
+  // the user is allowed to delete the tag. The following known error conditions may happen:
+  //
+  // - `InvalidArgument` if the repository, tag_name, user, or expected_old_oid (if provided)
+  //   are invalid.
+  // - `FailedPrecondition` if the tag_name can't be found, or the ref couldn't be deleted due
+  //   to a concurrent write to the same ref.
+  // - `Internal` if the tag_name can't be resolved or an unknown error occurs.
+  rpc UserDeleteTag(UserDeleteTagRequest) returns (UserDeleteTagResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // UserMergeToRef creates a merge commit and updates target_ref to point to that
+  // new commit. The first parent of the merge commit (the main line) is taken
+  // from first_parent_ref. The second parent is specified by its commit ID in source_sha.
+  // If target_ref already exists it will be overwritten.
+  rpc UserMergeToRef(UserMergeToRefRequest) returns (UserMergeToRefResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // UserRebaseToRef rebases source_sha on top of first_parent_ref and updates
+  // target_ref to point to that new commit. If target_ref already exists, then
+  // it will be overwritten. This operation is intended to be used on internal
+  // refs (e.g. refs/merge-requests/*) and does not call hooks.
+  rpc UserRebaseToRef(UserRebaseToRefRequest) returns (UserRebaseToRefResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // UserMergeBranch tries to merge the given commit into the target branch.
+  // The merge commit is created with the given user as author/committer and
+  // the given message.
+  //
+  // This is a two-stage RPC that requires confirmation to make user-visible
+  // changes to the repository:
+  // - The first request contains details about the requested merge, which
+  //   will result in a response with the created merge commit ID.
+  // - The second request should set `apply = true` to apply the merge.
+  //
+  // After the second request, it executes hooks and contacts Rails to verify
+  // that the user is allowed to update the branch. The following known error
+  // conditions may happen:
+  //
+  // - `InvalidArgument` if request fields can't be validated or resolved.
+  // - `NotFound` if the branch can't be found.
+  // - `FailedPrecondition` if there are merge conflicts, if the merge is
+  //   aborted by setting `apply = false` in the second request, or if the
+  //   merge fails due to a concurrent write to the same ref.
+  // - `PermissionDenied` if the user doesn't have permissions to merge a branch.
+  rpc UserMergeBranch(stream UserMergeBranchRequest) returns (stream UserMergeBranchResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // UserFFBranch tries to perform a fast-forward merge of a given commit into
+  // the given branch. If the merge is not a fast-forward merge, the request
+  // will fail. The RPC will return an empty response in case updating the
+  // reference fails e.g. because of a race.
+  rpc UserFFBranch(UserFFBranchRequest) returns (UserFFBranchResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // UserCherryPick tries to perform a cherry-pick of a given commit onto a
+  // branch.
+  rpc UserCherryPick(UserCherryPickRequest) returns (UserCherryPickResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // UserCommitFiles builds a commit from a stream of actions and updates the target branch to point to it.
+  // userCommitFilesRequest with a UserCommitFilesRequestHeader must be sent as the first message of the stream.
+  // Following that, a variable number of actions can be sent to build a new commit. Each action consists of
+  // a header followed by content if used by the action.
+  rpc UserCommitFiles(stream UserCommitFilesRequest) returns (UserCommitFilesResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // UserRebaseConfirmable rebases the given remote branch onto a target
+  // branch. The remote branch may be part of another repository.
+  //
+  // This RPC requires confirmation to make any user-visible changes to the
+  // repository. The first request sent shall contains details about the
+  // requested rebase, which will result in a response with the created rebase
+  // commit ID. Only if a second message with `apply = true` is sent will the
+  // rebase be applied.
+  rpc UserRebaseConfirmable(stream UserRebaseConfirmableRequest) returns (stream UserRebaseConfirmableResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // UserRevert tries to perform a revert of a given commit onto a branch.
+  rpc UserRevert(UserRevertRequest) returns (UserRevertResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // UserSquash squashes a range of commits into a single commit. If
+  // successful, it returns the object ID of the newly created squash commit.
+  // On error, it returns a gRPC error. Some specific errors will have an
+  // embedded UserSquashError such that clients can deduce what exactly has
+  // failed.
+  rpc UserSquash(UserSquashRequest) returns (UserSquashResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // UserApplyPatch applies patches to a given branch.
+  rpc UserApplyPatch(stream UserApplyPatchRequest) returns (UserApplyPatchResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+  // UserUpdateSubmodule updates a submodule to point to a new commit.
+  rpc UserUpdateSubmodule(UserUpdateSubmoduleRequest) returns (UserUpdateSubmoduleResponse) {
+    option (op_type) = {
+      op: MUTATOR
+    };
+  }
+
+}
+
+// UserCreateBranchRequest is a request for the UserCreateBranch RPC.
+message UserCreateBranchRequest {
+  // repository is the repository in which the branch should be created.
+  Repository repository = 1 [(target_repository)=true];
+  // branch_name is the name of the branch to create.
+  bytes branch_name = 2;
+  // user to execute the action as. Also used to perform authentication and
+  // authorization via an external endpoint.
+  User user = 3;
+  // start_point is the Git revision to start the branch at. See the gitrevisions(1)
+  // man pages for supported syntax.
+  bytes start_point = 4;
+}
+
+// UserCreateBranchResponse is a response for the UserCreateBranch RPC.
+message UserCreateBranchResponse {
+  // branch is the branch that was created.
+  Branch branch = 1;
+
+  // PreReceiveError had previously been set when creation of the branch was refused by hooks.
+  // Instead, Gitaly returns a structured error with the `custom_hook` field set.
+  reserved "pre_receive_error";
+  reserved 2;
+}
+
+// UserCreateBranchError is an error returned by the UserCreateBranch RPC in some specific well
+// defined error cases.
+message UserCreateBranchError {
+  oneof error {
+    // custom_hookError is set if any custom hook which has running as part of
+    // this RPC call has returned a non-zero exit code.
+    CustomHookError custom_hook = 1;
+  }
+}
+
+// UserUpdateBranchRequest is a request for the UserUpdateBranch RPC.
+message UserUpdateBranchRequest {
+  // repository is the repository to update the branch in.
+  Repository repository = 1 [(target_repository)=true];
+  // branch_name is the name of the branch to update.
+  bytes branch_name = 2;
+  // user to execute the action as. Also used to perform authentication and
+  // authorization via an external endpoint.
+  User user = 3;
+  // newrev is the Git revision which the branch will point to.
+  bytes newrev = 4;
+  // oldrev is the Git revision which the branch currently points to.
+  bytes oldrev = 5;
+}
+
+// UserUpdateBranchResponse is a response for the UserUpdateBranch RPC.
+message UserUpdateBranchResponse {
+  // pre_receive_error indicates an error that occurred while executing custom hooks.
+  string pre_receive_error = 1;
+}
+
+// UserDeleteBranchRequest is a request for the UserDeleteBranch RPC.
+message UserDeleteBranchRequest {
+  // repository is the repository to delete the branch in.
+  Repository repository = 1 [(target_repository)=true];
+  // branch_name is the name of the branch that shall be deleted. This is expected to be the branch
+  // name only, e.g. in case you want to delete `refs/heads/main` the request needs to only contain
+  // `main` as the branch name.
+  bytes branch_name = 2;
+  // user to execute the action as. Also used to perform authentication and
+  // authorization via an external endpoint.
+  User user = 3;
+  // expected_old_oid is the object ID which branch is expected to point to.
+  // This is used as a safety guard to avoid races when branch has been
+  // updated meanwhile to point to a different object ID.
+  //
+  // If unset, the target branch will be deleted regardless of its current
+  // state. If set, it must contain a valid, full object ID. Otherwise, this
+  // RPC will return an error.
+  string expected_old_oid = 4;
+}
+
+// UserDeleteBranchResponse is a response for the UserDeleteBranch RPC.
+message UserDeleteBranchResponse {
+  // PreReceiveError had previously been set in case access checks refused the branch deletion. This
+  // has been changed to instead we return a proper gRPC error with UserDeleteBranchError details
+  // set to an AccessCheckError.
+  reserved "pre_receive_error";
+  reserved 1;
+}
+
+// UserDeleteBranchError is an error returned by the UserDeleteBranch RPC in some specific well
+// defined error cases.
+message UserDeleteBranchError {
+  oneof error {
+    // access_check is set if the RPC failed due to an external access check.
+    AccessCheckError access_check = 1;
+    // reference_updateError is set if the RPC failed because updating the
+    // reference to the new object ID has failed.
+    ReferenceUpdateError reference_update = 2;
+    // custom_hook is set if any custom hook which has running as part of this RPC call has returned
+    // a non-zero exit code.
+    CustomHookError custom_hook = 3;
+  }
+}
+
+// UserDeleteTagRequest is a request for the UserDeleteTag RPC.
+message UserDeleteTagRequest {
+  // repository is the repository from which the tag should be deleted.
+  Repository repository = 1 [(target_repository)=true];
+  // tag_name is the name of the tag to delete.
+  bytes tag_name = 2;
+  // user to execute the action as. Also used to perform authentication and
+  // authorization via an external endpoint.
+  User user = 3;
+  // expected_old_oid is the object ID which tag is expected to point to.
+  // This is used as a safety guard to avoid races when tag has been
+  // updated meanwhile to point to a different object ID.
+  //
+  // If unset, the target tag will be deleted regardless of its current
+  // state. If set, it must contain a valid, full object ID. Otherwise,
+  // this RPC will return an error.
+  string expected_old_oid = 4;
+}
+
+// UserDeleteTagResponse is a response for the UserDeleteTag RPC.
+message UserDeleteTagResponse {
+  // pre_receive_error indicates an error that occurred while executing custom hooks.
+  string pre_receive_error = 1;
+}
+
+// UserCreateTagRequest is a request for the UserCreateTag RPC.
+message UserCreateTagRequest {
+  // repository is the repository in which the tag shall be created.
+  Repository repository = 1 [(target_repository)=true];
+  // tag_name is the name of the tag that shall be created. Note that this should be set to the name
+  // only: if you want to create a tag `refs/heads/v1.0`, you need to pass `v1.0` as TagName.
+  bytes tag_name = 2;
+  // user to execute the action as. Also used to perform authentication and
+  // authorization via an external endpoint.
+  User user = 3;
+  // target_revision is the revision that the newly created tag should be pointing to. Note that if
+  // the revision points to a tag, that tag will be peeled to the commit it is pointing to. If the
+  // target_revision does not point to a commit then the RPC will return an error.
+  bytes target_revision = 4;
+  // message is the message of the tag. If it is empty, a lightweight tag is created. Otherwise, an
+  // annotated tag is created.
+  bytes message = 5;
+  // timestamp is the optional timestamp to use for the created tag tags. If it's not set, the
+  // current time will be used. It's only used if an annotated tag is being created.
+  google.protobuf.Timestamp timestamp = 7;
+}
+
+// UserCreateTagResponse is a response for the UserCreateTag RPC.
+message UserCreateTagResponse {
+  // tag is the newly created tag.
+  Tag tag = 1;
+
+  // Exists had previously been set in case the tag exists already. Instead, Gitaly returns a
+  // structured error with the `reference_exists` field set now.
+  reserved "exists";
+  reserved 2;
+
+  // PreReceiveError had previously been set in case access checks refused the branch deletion. This
+  // has been changed to instead we return a proper gRPC error with UserDeleteBranchError details
+  // set to an AccessCheckError.
+  reserved "pre_receive_error";
+  reserved 3;
+}
+
+// UserCreateTagError includes error descriptions which may be set as error details in case
+// userCreateTag fails.
+message UserCreateTagError {
+  oneof error {
+    // access_check is set if the RPC failed due to an external access check.
+    AccessCheckError access_check = 1;
+    // reference_updateError is set if the RPC failed because updating the
+    // reference to the new object ID has failed.
+    ReferenceUpdateError reference_update = 2;
+    // custom_hook is set if any custom hook which has running as part of this RPC call has returned
+    // a non-zero exit code.
+    CustomHookError custom_hook = 3;
+    // reference_existsError is set if the tag reference exists already.
+    ReferenceExistsError reference_exists = 4;
+  }
+}
+
+// UserMergeBranchRequest is a request for the UserMergeBranch RPC.
+// All mandatory parameters except for `apply` should be set in the first
+// message.
+message UserMergeBranchRequest {
+  // repository is the repository to compute the merge for.
+  Repository repository = 1 [(target_repository)=true];
+  // user to execute the action as. Also used to perform authentication and
+  // authorization via an external endpoint.
+  User user = 2;
+  // commit_id is the object ID (hash) of the object that shall be merged into
+  // the target branch.
+  string commit_id = 3;
+  // branch is the branch into which the given commit shall be merged and whose
+  // reference is going to be updated.
+  bytes branch = 4;
+  // message is the message to use for the merge commit.
+  bytes message = 5;
+  // apply is used in the second message. Setting it to true will proceed with
+  // the merge. Setting it to false will abort the merge.
+  bool apply = 6;
+  // timestamp is the optional timestamp to use for the merge commit. If it's
+  // not set, the current time will be used.
+  google.protobuf.Timestamp timestamp = 7;
+  // expected_old_oid is the object ID which branch is expected to point to.
+  // This is used as a safety guard to avoid races when branch has been
+  // updated meanwhile to point to a different object ID.
+  //
+  // If unset, the target branch will be overwritten regardless of its current
+  // state. If set, it must either contain a valid, full object ID  or the
+  // zero object ID in case the branch should be created. Otherwise, this RPC
+  // will return an error.
+  string expected_old_oid = 8;
+  // squash is a flag to indicate that `commit_id` is a squash commit.
+  // When set to `true`, it merges only the squash commit without creating
+  // the merge commit.
+  bool squash = 9;
+  // sign signifies whether the commit is to be signed
+  bool sign = 10;
+}
+
+// UserMergeBranchResponse is a response for the UserMergeBranch RPC.
+message UserMergeBranchResponse {
+  // commit_id is the merge commit the branch will be updated to. This is sent
+  // as the response to the first request.
+  string commit_id = 1;
+
+  reserved 2;
+  // branch_update contains the commit ID of the merge commit if the merge has
+  // been applied to the branch. This is sent as the response to the second
+  // request.
+  OperationBranchUpdate branch_update = 3;
+
+  // Reserved for backwards compatibility. Structured errors are now used instead.
+  reserved "pre_receive_error";
+  reserved 4;
+}
+
+// UserMergeBranchError includes error descriptions which may be set as error
+// details in case UserMergeBranch fails.
+message UserMergeBranchError {
+  oneof error {
+    // access_check is set if the RPC failed due to an external access check.
+    AccessCheckError access_check = 1;
+    // reference_updateError is set if the RPC failed because updating the
+    // reference to the new object ID has failed.
+    ReferenceUpdateError reference_update = 2;
+    // custom_hook is set if any custom hook which has running as part of this RPC call has returned
+    // a non-zero exit code.
+    CustomHookError custom_hook = 3;
+    // merge_conflictError is set if merging the revisions has resulted in conflicting files.
+    MergeConflictError merge_conflict = 4;
+  }
+}
+
+// UserMergeToRefRequest is a request for the UserMergeToRef RPC.
+message UserMergeToRefRequest {
+  // repository is the repository in which the merge shall be computed.
+  Repository repository = 1 [(target_repository)=true];
+  // user to execute the action as. Also used to perform authentication and
+  // authorization via an external endpoint.
+  User user = 2;
+  // source_sha is the object ID of the second parent of the computed merge.
+  string source_sha = 3;
+  // branch contains the name of the branch which should be used as the first
+  // parent of the computed merge. It is deprecated in favor of
+  // `first_parent_ref` and will be ignored in case it is set.
+  bytes branch = 4 [deprecated = true];
+  // target_ref contains the fully qualified reference which should be updated
+  // with the computed merge commit.
+  bytes target_ref = 5;
+  // message is the message to use for the merge commit.
+  bytes message = 6;
+  // first_parent_ref is the name of the reference which should be used as the
+  // first parent of the computed merge. Overrides `branch`.
+  bytes first_parent_ref = 7;
+
+  // allow_conflicts if set, used to allow the merge to go ahead when there were
+  // conflicts.  The code would simply write the conflict markers in the code.
+  // This has since been deprecated in Rails and is no longer needed.
+  bool allow_conflicts = 8 [deprecated = true];
+
+  // timestamp is the optional timestamp to use for the merge commit. If it's
+  // not set, the current time will be used.
+  google.protobuf.Timestamp timestamp = 9;
+  // expected_old_oid is the object ID that is expected to be at target_ref. It
+  // is used as an optimistic lock on concurrent updates of target_ref: If
+  // target_ref no longer points to this ID, then the update is rejected.
+  //
+  // expected_old_oid is the object ID which branch is expected to point to.
+  // This is used as a safety guard to avoid races when branch has been
+  // updated meanwhile to point to a different object ID.
+  //
+  // If unset, the target branch will be overwritten regardless of its current
+  // state. If set, it must either contain a valid, full object ID  or the
+  // zero object ID in case the branch should be created. Otherwise, this RPC
+  // will return an error.
+  string expected_old_oid = 10;
+  // sign signifies whether the commit is to be signed
+  bool sign = 11;
+}
+
+// UserMergeToRefResponse is a response for the UserMergeToRef RPC.
+message UserMergeToRefResponse {
+  // commit_id is the object ID of the computed merge commit.
+  string commit_id = 1;
+
+  // pre_receive_error had never been set because this RPC does not perform
+  // authentication and authorization via an external endpoint. This field was
+  // thus removed without replacement.
+  reserved "pre_receive_error";
+  reserved 2;
+}
+
+// UserRebaseToRefRequest contains the request parameters for the UserRebaseToRef RPC
+message UserRebaseToRefRequest {
+  // repository is the repository in which the rebase shall be computed.
+  Repository repository = 1 [(target_repository)=true];
+  // user to execute the action as. Also used to perform authentication and
+  // authorization via an external endpoint.
+  User user = 2;
+  // source_sha is the object ID of the commit to be rebased.
+  string source_sha = 3;
+  // target_ref is the fully qualified reference that will be overwritten or created
+  // with the rebased commits.
+  bytes target_ref = 5;
+  // first_parent_ref is the name of the reference on top of which SourceSha
+  // should be rebased.
+  bytes first_parent_ref = 7;
+  // timestamp is the optional timestamp to use for the rebased commits as
+  // committer date. If it's not set, the current time will be used.
+  google.protobuf.Timestamp timestamp = 9;
+  // expected_old_oid is the object ID to which TargetRef is expected to point.
+  // This is used as a safety guard to avoid races when TargetRef has been
+  // updated meanwhile to point to a different object ID.
+  //
+  // If unset, TargetRef will be overwritten regardless of its current state.
+  // If set, it must either contain a valid, full object ID or the zero object
+  // ID in case the ref should be created. Otherwise, this RPC will return an
+  // error.
+  string expected_old_oid = 10;
+}
+
+// UserRebaseToRefResponse contains the response data for the UserRebaseToRef RPC
+message UserRebaseToRefResponse {
+  // commit_id is the object ID of the HEAD of the rebased ref.
+  string commit_id = 1;
+}
+
+
+// OperationBranchUpdate contains the details of a branch update.
+message OperationBranchUpdate {
+  // commit_id is set to the OID of the created commit if a branch was created or updated.
+  string commit_id = 1;
+  // repo_created indicates whether the branch created was the first one in the repository.
+  // Used for cache invalidation in GitLab.
+  bool repo_created = 2;
+  // branch_created indicates whether the branch already existed in the repository
+  // and was updated or whether it was created. Used for cache invalidation in GitLab.
+  bool branch_created = 3;
+}
+
+// UserFFBranchError is an error returned by the UserFFBranch RPC in some specific well
+// defined error cases.
+message UserFFBranchError {
+  oneof error {
+    // custom_hook is set if any custom hook which was running as part of this RPC call
+    // has returned a non-zero exit code.
+    CustomHookError custom_hook = 1;
+    // reference_update is set if the RPC failed because updating the reference to the new
+    // object ID has failed.
+    ReferenceUpdateError reference_update = 2;
+  }
+}
+
+// UserFFBranchRequest is a request for the UserFFBranch RPC.
+message UserFFBranchRequest {
+  // repository is the repository for which to perform the fast-forward merge.
+  Repository repository = 1 [(target_repository)=true];
+  // user to execute the action as. Also used to perform authentication and
+  // authorization via an external endpoint.
+  User user = 2;
+  // commit_id is the commit ID to fast-forward the branch to.
+  string commit_id = 3;
+  // branch is the name of the branch to fast-forward. This must be the
+  // branch name only and not a fully qualified reference, e.g. "master"
+  // instead of "refs/heads/master".
+  bytes branch = 4;
+  // expected_old_oid is the object ID which branch is expected to point to.
+  // This is used as a safety guard to avoid races when branch has been
+  // updated meanwhile to point to a different object ID.
+  //
+  // If unset, the target branch will be overwritten regardless of its current
+  // state. If set, it must either contain a valid, full object ID  or the
+  // zero object ID in case the branch should be created. Otherwise, this RPC
+  // will return an error.
+  string expected_old_oid = 5;
+}
+
+// UserFFBranchResponse is a response for the UserFFBranch RPC.
+message UserFFBranchResponse {
+  // branch_update contains details of the fast-forwarded branch.
+  OperationBranchUpdate branch_update = 1;
+  // pre_receive_error is set in the case of an `Internal` error and contains
+  // details of the failed custom hook.
+  string pre_receive_error = 2;
+}
+
+// UserCherryPickRequest is a request for the UserCherryPick RPC.
+message UserCherryPickRequest {
+  // repository is the repository into which the cherry-pick shall be
+  // performed.
+  Repository repository = 1 [(target_repository)=true];
+  // user to execute the action as. Also used to perform authentication and
+  // authorization via an external endpoint.
+  User user = 2;
+  // commit is the commit to cherry-pick onto the given branch.
+  GitCommit commit = 3;
+  // branch_name is the name of the branch onto which the cherry-pick shall be
+  // executed.
+  bytes branch_name = 4;
+  // message is the message to use for the cherry-picked commit.
+  bytes message = 5;
+  // start_branch_name is is used in case the branch_name branch does not
+  // exist. In that case, it will be created from the start_branch_name.
+  bytes start_branch_name = 6;
+  // start_repository is used in case the branch_name branch does not exist. In
+  // that case, it will be created from start_branch_name in the
+  // start_repository.
+  Repository start_repository = 7;
+  // dry_run will compute the cherry-pick, but not update the target branch.
+  bool dry_run = 8;
+  // timestamp is the optional timestamp to use for the created cherry-picked
+  // commit's committer date. If it's not set, the current time will be used.
+  google.protobuf.Timestamp timestamp = 9;
+  // expected_old_oid is the object ID which branch is expected to point to.
+  // This is used as a safety guard to avoid races when branch has been
+  // updated meanwhile to point to a different object ID. Only applicable when
+  // branch_name is set.
+  //
+  // If unset, the target branch will be overwritten regardless of its current
+  // state. If set, it must either contain a valid, full object ID  or the
+  // zero object ID in case the branch should be created. Otherwise, this RPC
+  // will return an error.
+  string expected_old_oid = 10;
+  // commit_author_name is the author to be applied to the cherry-picked commit. If not provided, the original commit's author name is
+  // used instead.
+  bytes commit_author_name = 11;
+  // commit_author_email is the author email to be applied to the cherry-picked commit. If not provided, the original commit's author email is
+  // used instead.
+  bytes commit_author_email = 12;
+  // sign signifies whether the commit is to be signed
+  bool sign = 13;
+}
+
+// UserCherryPickResponse is a response for the UserCherryPick RPC.
+message UserCherryPickResponse {
+  // branch_update represents details about the updated branch.
+  OperationBranchUpdate branch_update = 1;
+
+  // CreateTreeError has previously been set when creating the tree failed. Instead, Gitaly returns
+  // a structured error with the `cherry_pick_conflict` or `changes_already_applied` field set.
+  reserved "create_tree_error";
+  reserved 2;
+  // commitError has previously been set when creating the commit failed. Instead, Gitaly returns a
+  // structured error with the `target_branch_diverged` field set.
+  reserved "commit_error";
+  reserved 3;
+  // PreReceiveError has previously been set when access checks have refused the cherry-pick.
+  // Instead, Gitaly returns a structured error with the `access_check` field set.
+  reserved "pre_receive_error";
+  reserved 4;
+  // CreateTreeError code was previously set to denote why creating the tree has failed. There is no
+  // replacement.
+  reserved "create_tree_error_code";
+  reserved 5;
+}
+
+// UserCherryPickError is an error returned by the UserCherryPick RPC.
+message UserCherryPickError {
+  oneof error {
+    // cherry_pick_conflict is returned if there is a conflict when applying the cherry
+    // pick.
+    MergeConflictError cherry_pick_conflict = 1;
+    // target_branch_diverged is returned whenever the tip commit of the branch we're
+    // about to apply the new commit on is not a direct ancestor of the newly created
+    // cherry-picked commit. This may happen either due to a race where the reference
+    // is modified while we compute the cherry-picked commit, or alternatively if the
+    // commit fetched from the start branch of the remote repository is not an ancestor
+    // of of the local target branch.
+    NotAncestorError target_branch_diverged = 2;
+    // changes_already_applied is returned if the result after applying the cherry pick is empty.
+    ChangesAlreadyAppliedError changes_already_applied = 3;
+    // access_check is set if the RPC failed due to an external access check.
+    AccessCheckError access_check = 4;
+  }
+}
+
+// UserRevertRequest is a request for the UserRevert RPC.
+message UserRevertRequest {
+  // repository is the repository in which the revert shall be applied.
+  Repository repository = 1 [(target_repository)=true];
+  // user to execute the action as. Also used to perform authentication and
+  // authorization via an external endpoint.
+  User user = 2;
+  // commit is the commit to revert. Only the `id` field is required.
+  GitCommit commit = 3;
+  // branch_name is the name of the branch onto which the reverted commit shall
+  // be committed.
+  bytes branch_name = 4;
+  // message is the message to use for the revert commit.
+  bytes message = 5;
+  // start_branch_name is is used in case the branch_name branch does not
+  // exist. In that case, it will be created from the start_branch_name.
+  bytes start_branch_name = 6;
+  // start_repository is used in case the branch_name branch does not exist. In
+  // that case, it will be created from start_branch_name in the
+  // start_repository.
+  Repository start_repository = 7;
+  // dry_run  will compute the revert, but not update the target branch.
+  bool dry_run = 8;
+  // timestamp is the optional timestamp to use for the created cherry-picked
+  // commit's committer date. If it's not set, the current time will be used.
+  google.protobuf.Timestamp timestamp = 9;
+  // expected_old_oid is the object ID which branch is expected to point to.
+  // This is used as a safety guard to avoid races when branch has been
+  // updated meanwhile to point to a different object ID. Only applicable when
+  // branch_name is set.
+  //
+  // If unset, the target branch will be overwritten regardless of its current
+  // state. If set, it must either contain a valid, full object ID  or the
+  // zero object ID in case the branch should be created. Otherwise, this RPC
+  // will return an error.
+  string expected_old_oid = 10;
+  // sign controls whether a commit created by Gitaly must be signed using
+  // a signing key configured system-wide.
+  bool sign = 11;
+}
+
+// UserRevertResponse is a response for the UserRevert RPC.
+message UserRevertResponse {
+  // CreateTreeError represents an error which happened when computing the
+  // revert.
+  enum CreateTreeError {
+    // NONE denotes that no error occurred.
+    NONE = 0; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX ENUM_FIELD_NAMES_ZERO_VALUE_END_WITH
+    // EMPTY denotes that the revert would've resulted in an empty commit,
+    // typically because it has already been applied to the target branch.
+    EMPTY = 1; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+    // CONFLICT denotes that the revert resulted in a conflict.
+    CONFLICT = 2; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+  }
+
+  // branch_update represents details about the updated branch.
+  OperationBranchUpdate branch_update = 1;
+  // create_tree_error contains the error message if creation of the tree
+  // failed.
+  string create_tree_error = 2;
+  // commit_error contains the error message if updating the reference failed.
+  string commit_error = 3;
+  // pre_receive_error contains the error message if the pre-receive hook
+  // failed.
+  string pre_receive_error = 4;
+  // create_tree_error_code contains the error code if creation of the tree
+  // failed.
+  CreateTreeError create_tree_error_code = 5;
+}
+
+// UserRevertError is an error returned by the UserRevert RPC.
+message UserRevertError {
+  oneof error {
+    // merge_conflict is returned if there is a conflict when applying the revert.
+    MergeConflictError merge_conflict = 1;
+    // changes_already_applied is returned if the result after applying the revert is empty.
+    ChangesAlreadyAppliedError changes_already_applied = 2;
+    // custom_hook contains the error message if the pre-receive hook failed.
+    CustomHookError custom_hook = 3;
+    // not_ancestor is returned if the old tip of the target branch is not an ancestor of the new commit.
+    NotAncestorError not_ancestor = 4;
+  }
+}
+
+// UserCommitFilesActionHeader contains the details of the action to be performed.
+message UserCommitFilesActionHeader {
+  // ActionType is the type of action to perform.
+  enum ActionType {
+    // CREATE creates a new file.
+    CREATE = 0; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX ENUM_FIELD_NAMES_ZERO_VALUE_END_WITH
+    // CREATE_DIR creates a new directory.
+    CREATE_DIR = 1; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+    // UPDATE updates an existing file.
+    UPDATE = 2; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+    // MOVE moves an existing file to a new path.
+    MOVE = 3; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+    // DELETE deletes an existing file.
+    DELETE = 4; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+    // CHMOD changes the permissions of an existing file.
+    CHMOD = 5; // protolint:disable:this ENUM_FIELD_NAMES_PREFIX
+  }
+
+  // action is the type of the action taken to build a commit. Not all fields are
+  // used for all of the actions.
+  ActionType action = 1;
+  // file_path refers to the file or directory being modified. The meaning differs for each
+  // action:
+  //   1. CREATE: path of the file to create
+  //   2. CREATE_DIR: path of the directory to create
+  //   3. UPDATE: path of the file to update
+  //   4. MOVE: the new path of the moved file
+  //   5. DELETE: path of the file to delete
+  //   6. CHMOD: path of the file to modify permissions for
+  bytes file_path = 2;
+  // previous_path is used in MOVE action to specify the path of the file to move.
+  bytes previous_path = 3;
+  // base64_content indicates the content of the file is base64 encoded. The encoding
+  // must be the standard base64 encoding defined in RFC 4648. Only used for CREATE and
+  // UPDATE actions.
+  bool base64_content = 4;
+  // execute_filemode determines whether the file is created with execute permissions.
+  // The field is only used in CREATE and CHMOD actions.
+  bool execute_filemode = 5;
+  // infer_content should be set to true for move actions that change the file path, but not
+  // its content. It should be set instead of populating the content field. Ignored for
+  // other action types.
+  bool infer_content = 6;
+}
+
+// UserCommitFilesAction is the request message used to stream in the actions to build a commit.
+message UserCommitFilesAction {
+  oneof user_commit_files_action_payload {
+    // header contains the details of action being performed. Header must be sent before the
+    // content if content is used by the action.
+    UserCommitFilesActionHeader header = 1;
+    // content is the content of the file streamed in one or more messages. Only used with CREATE
+    // and UPDATE actions.
+    bytes content = 2;
+  }
+}
+
+// UserCommitFilesRequestHeader is the header of the UserCommitFiles that defines the commit details,
+// parent and other information related to the call.
+message UserCommitFilesRequestHeader {
+  // repository is the target repository where to apply the commit.
+  Repository repository = 1 [(target_repository)=true];
+  // user to execute the action as. Also used to perform authentication and
+  // authorization via an external endpoint.
+  User user = 2;
+  // branch_name is the name of the branch to point to the new commit. If start_sha and start_branch_name
+  // are not defined, the commit of branch_name is used as the parent commit.
+  bytes branch_name = 3;
+  // commit_message is the message to use in the commit.
+  bytes commit_message = 4;
+  // commit_author_name is the commit author's name. If not provided, the user's name is
+  // used instead.
+  bytes commit_author_name = 5;
+  // commit_author_email is the commit author's email. If not provided, the user's email is
+  // used instead.
+  bytes commit_author_email = 6;
+  // start_branch_name specifies the branch whose commit to use as the parent commit. Takes priority
+  // over branch_name. Optional.
+  bytes start_branch_name = 7;
+  // start_repository specifies which contains the parent commit. If not specified, repository itself
+  // is used to look up the parent commit. Optional.
+  Repository start_repository = 8;
+  // force determines whether to force update the target branch specified by branch_name to
+  // point to the new commit.
+  bool force = 9;
+  // start_sha specifies the SHA of the commit to use as the parent of new commit. Takes priority
+  // over start_branch_name and branch_name. Optional.
+  string start_sha = 10;
+  // timestamp is the optional timestamp to use for the commits as author and
+  // committer date. If it's not set, the current time will be used.
+  google.protobuf.Timestamp timestamp = 11;
+  // expected_old_oid is the object ID which branch is expected to point to.
+  // This is used as a safety guard to avoid races when branch has been
+  // updated meanwhile to point to a different object ID. Only applicable when
+  // branch_name is set.
+  //
+  // If unset, the target branch will be overwritten regardless of its current
+  // state. If set, it must either contain a valid, full object ID  or the
+  // zero object ID in case the branch should be created. Otherwise, this RPC
+  // will return an error.
+  string expected_old_oid = 12;
+  // sign controls whether a commit created by Gitaly must be signed using
+  // a signing key configured system-wide.
+  bool sign = 13;
+}
+
+// UserCommitFilesRequest is the request of UserCommitFiles.
+message UserCommitFilesRequest {
+  oneof user_commit_files_request_payload {
+    // header defines the details of where to commit, the details and which commit to use as the parent.
+    // header must always be sent as the first request of the stream.
+    UserCommitFilesRequestHeader header = 1;
+    // action contains an action to build a commit. There can be multiple actions per stream.
+    UserCommitFilesAction action = 2;
+  }
+}
+
+// UserCommitFilesResponse is the response object of UserCommitFiles.
+message UserCommitFilesResponse {
+  // branch_update contains the details of the commit and the branch update.
+  OperationBranchUpdate branch_update = 1;
+  // index_error is set to the error message when an invalid action was attempted, such as
+  // trying to create a file that already existed.
+  string index_error = 2;
+  // pre_receive_error is set when the pre-receive hook errored.
+  string pre_receive_error = 3;
+}
+
+// UserCommitFilesError is an error returned by the UserCommitFiles RPC in some specific well
+// defined error cases.
+message UserCommitFilesError {
+  oneof error {
+    // access_check is set if the RPC failed due to an external access check.
+    AccessCheckError access_check = 1;
+    // index_update is set to the error message when an operation conflicts with the repository
+    // index, such as creating a file that already exists.
+    IndexError index_update = 2;
+    // custom_hook is set if any custom hook which has running as part of this RPC call has returned
+    // a non-zero exit code.
+    CustomHookError custom_hook = 3;
+  }
+}
+
+// UserRebaseConfirmableRequest is a request for the UserRebaseConfirmable RPC.
+message UserRebaseConfirmableRequest {
+  // Header contains information to compute the rebase and must be sent as
+  // first message.
+  message Header {
+    // repository is the repository in which the rebase will be computed and
+    // applied.
+    Repository repository = 1 [(target_repository)=true];
+    // user to execute the action as. Also used to perform authentication and
+    // authorization via an external endpoint.
+    User user = 2;
+    // rebase_id does nothing anymore.
+    string rebase_id = 3 [deprecated=true];
+    // branch is the branch onto which the rebase shall happen.
+    bytes branch = 4;
+    // branch_sha is the expected object ID which branch currently points to.
+    // This is used as a safety guard to avoid races when branch has been
+    // updated meanwhile.
+    string branch_sha = 5;
+    // remote_repository is the repository which contains the branch which
+    // shall be rebased onto the local branch.
+    Repository remote_repository = 6;
+    // remote_branch contains the branch name which shall re rebased onto the
+    // local branch.
+    bytes remote_branch = 7;
+    // git_push_options contain options which shall be passed to the git hooks
+    // when the local branch gets updated.
+    repeated string git_push_options = 8;
+    // timestamp is the optional timestamp to use for the rebased commits as
+    // committer date. If it's not set, the current time will be used.
+    google.protobuf.Timestamp timestamp = 9;
+  }
+
+  oneof user_rebase_confirmable_request_payload {
+    // header must be the first request for each request stream
+    // containing details about the rebase to perform.
+    Header header = 1;
+    // apply is the second request that must be made to confirm that
+    // the rebase should be applied to the branch.
+    bool apply = 2;
+  }
+}
+
+// UserRebaseConfirmableResponse is a response for the UserRebaseConfirmable RPC.
+message UserRebaseConfirmableResponse {
+  oneof user_rebase_confirmable_response_payload {
+    // rebase_sha is the commit the branch will be updated to, it will be present
+    // in the first response. The caller can still abort the rebase.
+    string rebase_sha = 1;
+    // rebase_applied confirms that the rebase has been applied to the branch.
+    // It is present in the second response.
+    bool rebase_applied = 2;
+  }
+  // Deprecated in favour of `UserRebaseConfirmableError`.
+  reserved 3;
+  reserved "pre_receive_error";
+  // Deprecated in favour of `UserRebaseConfirmableError`.
+  reserved 4;
+  reserved "git_error";
+}
+
+// UserSquashRequest is a request for the UserSquash RPC.
+message UserSquashRequest {
+  // repository is the repository into which the squashed commit shall be
+  // written.
+  Repository repository = 1 [(target_repository)=true];
+  // user to execute the action as. Also used to perform authentication and
+  // authorization via an external endpoint.
+  User user = 2;
+  // start_sha is the object ID of the start commit of the range which shall be
+  // squashed. Must be an ancestor of end_sha.
+  string start_sha = 5;
+  // end_sha is the object ID of the end commit of the range which shall be
+  // squashed.
+  string end_sha = 6;
+  // author will be used as the author of the squashed commit.
+  User author = 7;
+  // commit_message is the message to be used for the squashed commit.
+  bytes commit_message = 8;
+  // timestamp is the optional timestamp to use for the squashed commit as
+  // committer date. If it's not set, the current time will be used.
+  google.protobuf.Timestamp timestamp = 9;
+  // sign signifies whether the commit is to be signed
+  bool sign = 10;
+
+  reserved 3, 4;
+  reserved "squash_id";
+}
+
+// UserSquashResponse is a response for the UserSquash RPC.
+message UserSquashResponse {
+  // squash_sha is the object ID of the squashed commit.
+  string squash_sha = 1;
+
+  // Deprecated as custom hooks aren't executed.
+  reserved 2;
+  reserved "pre_receive_error";
+
+  // git_error is not used anymore. Instead, this RPC always returns a real
+  // error with an optional `UserSquashError`, which may be set on
+  // special errors.
+  reserved 3;
+  reserved "git_error";
+}
+
+// UserRebaseConfirmableError is a structured error for the UserRebaseConfirmable RPC.
+message UserRebaseConfirmableError {
+  oneof error {
+    // rebase_conflict is returned in case rebasing commits on top of the start
+    // commit fails with a merge conflict and in case merge squashing commits
+    // fails with a merge conflict.
+    MergeConflictError rebase_conflict = 1;
+    // access_check is set if the RPC failed due to an external access check.
+    AccessCheckError access_check = 2;
+  }
+}
+
+// UserSquashError is an error that may be returned when the UserSquash RPC
+// fails.
+message UserSquashError {
+  oneof error {
+    // resolve_revision is returned in case resolving either the start or end
+    // revision has failed.
+    ResolveRevisionError resolve_revision = 1;
+    // rebase_conflict is returned in case rebasing commits on top of the start
+    // commit fails with a merge conflict.
+    MergeConflictError rebase_conflict = 2;
+  }
+}
+
+// UserApplyPatchRequest is a request for the UserApplyPatch RPC.
+message UserApplyPatchRequest {
+  // Header contains information about how to apply the patches.
+  message Header {
+    // repository is the repository to which the patches shall be applied to.
+    Repository repository = 1 [(target_repository)=true];
+    // user to execute the action as. Also used to perform authentication and
+    // authorization via an external endpoint.
+    User user = 2;
+    // target_branch is the branch onto which the patches shall be applied.
+    bytes target_branch = 3;
+    // timestamp is the optional timestamp to use for the squashed commit as
+    // committer date. If it's not set, the current time will be used.
+    google.protobuf.Timestamp timestamp = 4;
+    // expected_old_oid is the object ID which branch is expected to point to.
+    // This is used as a safety guard to avoid races when branch has been
+    // updated meanwhile to point to a different object ID.
+    //
+    // If unset, the target branch will be overwritten regardless of its current
+    // state. If set, it must either contain a valid, full object ID  or the
+    // zero object ID in case the branch should be created. Otherwise, this RPC
+    // will return an error.
+    string expected_old_oid = 5;
+  }
+
+  oneof user_apply_patch_request_payload {
+    // header must be sent as the first message and contains information about
+    // how to apply the patches.
+    Header header = 1;
+    // patches contains the patch data.
+    bytes patches = 2;
+  }
+}
+
+// UserApplyPatchError is an error returned by the UserApplyPatch RPC in some specific well
+// defined error cases.
+message UserApplyPatchError {
+  oneof error {
+    // custom_hook is set if any custom hook which has running as part of this RPC call has returned
+    // a non-zero exit code.
+    CustomHookError custom_hook = 1;
+  }
+}
+// UserApplyPatchResponse is a response for the UserApplyPatch RPC.
+message UserApplyPatchResponse {
+  // branch_update contains information about the updated branch.
+  OperationBranchUpdate branch_update = 1;
+}
+
+// UserUpdateSubmoduleRequest is a request for the UserUpdateSubmodule RPC.
+message UserUpdateSubmoduleRequest {
+  // repository is the repository in which the submodule shall be updated.
+  Repository repository = 1 [(target_repository)=true];
+  // user to execute the action as. Also used to perform authentication and
+  // authorization via an external endpoint.
+  User user = 2;
+  // commit_sha is the object ID the submodule shall be updated to.
+  string commit_sha = 3;
+  // branch is the branch which shall be updated. This is the unqualified name
+  // of the branch, it must not have a "refs/heads/" prefix.
+  bytes branch = 4;
+  // submodule is the path to the submodule which shall be updated.
+  bytes submodule = 5;
+  // commit_message is the message updating the submodule.
+  bytes commit_message = 6;
+  // timestamp is the optional timestamp to use for the commit updating the
+  // submodule as committer date. If it's not set, the current time will be
+  // used.
+  google.protobuf.Timestamp timestamp = 7;
+  // expected_old_oid is the object ID which branch is expected to point to.
+  // This is used as a safety guard to avoid races when branch has been
+  // updated meanwhile to point to a different object ID.
+  //
+  // If unset, the target branch will be overwritten regardless of its current
+  // state. If set, it must either contain a valid, full object ID  or the
+  // zero object ID in case the branch should be created. Otherwise, this RPC
+  // will return an error.
+  string expected_old_oid = 8;
+}
+
+// UserUpdateSubmoduleResponse is a response for the UserUpdateSubmodule RPC.
+message UserUpdateSubmoduleResponse {
+  // branch_update contains information about the updated branch.
+  OperationBranchUpdate branch_update = 1;
+  // pre_receive_error contains an error message if the pre-receive hook
+  // rejects the update.
+  string pre_receive_error = 2;
+  // DEPRECATED: https://gitlab.com/gitlab-org/gitaly/proto/merge_requests/237
+  reserved 3;
+  reserved "create_tree_error";
+  // commit_error contains an error message if committing the update fails.
+  string commit_error = 4;
+}
+
+// UserUpdateSubmoduleError is a structured error for the UserUpdateSubmodule RPC.
+message UserUpdateSubmoduleError {
+  oneof error {
+    // custom_hook is set if any custom hook which has running as part of this RPC call has returned
+    // a non-zero exit code.
+    CustomHookError custom_hook = 1;
+    // reference_update is set if the RPC failed because updating the
+    // reference to the new object ID has failed (commiting the update).
+    ReferenceUpdateError reference_update = 2;
+    // path_error is set if there was a failure in reading or updatinggl the submodule path
+    PathError path_error = 3;
+  }
+}

@@ -1,0 +1,123 @@
+syntax = "proto3";
+
+package gitaly;
+
+import "google/protobuf/duration.proto";
+import "lint.proto";
+
+option go_package = "gitlab.com/gitlab-org/gitaly/v18/proto/go/gitalypb";
+
+// ServerService is a service that provides information about a Gitaly server.
+service ServerService {
+  option (intercepted) = true;
+
+  // ServerInfo ...
+  rpc ServerInfo(ServerInfoRequest) returns (ServerInfoResponse);
+
+  // DiskStatistics ...
+  rpc DiskStatistics(DiskStatisticsRequest) returns (DiskStatisticsResponse);
+
+  // ReadinessCheck runs the set of the checks to make sure service is in operational state.
+  rpc ReadinessCheck(ReadinessCheckRequest) returns (ReadinessCheckResponse);
+
+  // ServerSignature returns the contents of the public key used to sign
+  // commits made through the GitLab UI or Web IDE.
+  // See https://docs.gitlab.com/user/project/repository/signed_commits/#verify-commits-made-in-the-web-ui
+  // for more information.
+  rpc ServerSignature(ServerSignatureRequest) returns (ServerSignatureResponse);
+}
+
+// ServerInfoRequest ...
+message ServerInfoRequest {
+}
+
+// ServerInfoResponse ...
+message ServerInfoResponse {
+  // StorageStatus ...
+  message StorageStatus {
+    // storage_name ...
+    string storage_name = 1;
+    // readable ...
+    bool readable = 2;
+    // writeable ...
+    bool writeable = 3;
+    // fs_type ...
+    string fs_type = 4;
+    // filesystem_id ...
+    string filesystem_id = 5;
+    // replication_factor ...
+    uint32 replication_factor = 6;
+  }
+
+  // server_version ...
+  string server_version = 1;
+  // git_version ...
+  string git_version = 2;
+  // storage_statuses ...
+  repeated StorageStatus storage_statuses = 3;
+}
+
+// DiskStatisticsRequest ...
+message DiskStatisticsRequest {
+}
+
+// DiskStatisticsResponse ...
+message DiskStatisticsResponse {
+  // StorageStatus ...
+  // When both available and used fields are equal 0 that means that
+  // Gitaly was unable to determine storage stats.
+  message StorageStatus {
+    // storage_name ...
+    string storage_name = 1;
+    // available ...
+    int64 available = 2;
+    // used ...
+    int64 used = 3;
+  }
+
+  // storage_statuses ...
+  repeated StorageStatus storage_statuses = 1;
+}
+
+// ReadinessCheckRequest is used to verify if the service is in operational state.
+message ReadinessCheckRequest {
+  // timeout is an amount of milliseconds for the check to run before give up and mark as failed.
+  google.protobuf.Duration timeout = 1;
+}
+
+// ReadinessCheckResponse is just a stub now and contains no information.
+// If the service is not in the operational state the error will be returned instead.
+message ReadinessCheckResponse {
+  // Ok represents response if none checks failed.
+  message Ok {
+  }
+  // Failure represents response if at least one check failed.
+  message Failure {
+    // Response contains information about failed check.
+    message Response {
+      // name is a name of the check that was performed.
+      string name = 1;
+      // error_message is a cause of the check failure.
+      string error_message = 2;
+    }
+    // failed_checks is a list of failed checks.
+    repeated Response failed_checks = 1;
+  }
+
+  oneof Result {
+    // ok_response is set when all checks pass.
+    Ok ok_response = 1;
+    // failure_response is set if at least one check failed.
+    Failure failure_response = 2;
+  }
+}
+
+// ServerSignatureRequest is the request for the ServerSignature RPC.
+message ServerSignatureRequest {
+}
+
+// ServerSignatureResponse is the response for the ServerSignature RPC.
+message ServerSignatureResponse {
+  // public_key is the string with a content of the public key.
+  bytes public_key = 1;
+}

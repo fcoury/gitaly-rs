@@ -7,12 +7,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  GITALY_PROTO_ROOT: ${{ github.workspace }}/proto
+
 jobs:
   workspace-tests:
     name: workspace-tests (${{ matrix.os }}, ${{ matrix.toolchain }})
     runs-on: ${{ matrix.os }}
-    env:
-      GITALY_PROTO_ROOT: ${{ github.workspace }}/proto
     strategy:
       fail-fast: false
       matrix:
@@ -27,13 +28,6 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
 
-      - name: fetch upstream proto definitions
-        run: |
-          rm -rf /tmp/gitaly-upstream
-          git clone --depth 1 https://gitlab.com/gitlab-org/gitaly.git /tmp/gitaly-upstream
-          mkdir -p proto
-          cp -R /tmp/gitaly-upstream/proto/. proto/
-
       - name: install protoc
         uses: arduino/setup-protoc@v3
 
@@ -47,8 +41,6 @@ jobs:
     name: stress-gate (ubuntu, stable)
     runs-on: ubuntu-latest
     needs: workspace-tests
-    env:
-      GITALY_PROTO_ROOT: ${{ github.workspace }}/proto
     steps:
       - name: checkout
         uses: actions/checkout@v4
@@ -57,13 +49,6 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
-
-      - name: fetch upstream proto definitions
-        run: |
-          rm -rf /tmp/gitaly-upstream
-          git clone --depth 1 https://gitlab.com/gitlab-org/gitaly.git /tmp/gitaly-upstream
-          mkdir -p proto
-          cp -R /tmp/gitaly-upstream/proto/. proto/
 
       - name: install protoc
         uses: arduino/setup-protoc@v3

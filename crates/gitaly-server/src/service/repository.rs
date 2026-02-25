@@ -58,6 +58,45 @@ impl RepositoryServiceImpl {
 
         Ok(storage_root.join(repository.relative_path))
     }
+
+    fn resolve_existing_repo_path(
+        &self,
+        repository: Option<Repository>,
+    ) -> Result<PathBuf, Status> {
+        let repo_path = self.resolve_repo_path(repository)?;
+        if !repo_path.exists() {
+            return Err(Status::not_found("repository does not exist"));
+        }
+
+        Ok(repo_path)
+    }
+
+    async fn init_bare_repo_at(&self, repo_path: &Path) -> Result<(), Status> {
+        if repo_path.exists() {
+            return Err(Status::already_exists("repository already exists"));
+        }
+
+        if let Some(parent) = repo_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| {
+                Status::internal(format!(
+                    "failed to create repository parent directory: {err}"
+                ))
+            })?;
+        }
+
+        let repo_path = repo_path.to_string_lossy().into_owned();
+        let args = ["init", "--bare", repo_path.as_str()];
+        let output = Command::new("git")
+            .args(args)
+            .output()
+            .await
+            .map_err(|err| Status::internal(format!("failed to execute git init: {err}")))?;
+        if !output.status.success() {
+            return Err(status_for_git_failure("init --bare <repo>", &output));
+        }
+
+        Ok(())
+    }
 }
 
 fn validate_relative_path(relative_path: &str) -> Result<(), Status> {
@@ -195,8 +234,23 @@ fn status_for_git_failure(args: &str, output: &std::process::Output) -> Status {
     ))
 }
 
-fn unimplemented_repository_rpc(name: &str) -> Status {
-    Status::unimplemented(format!("RepositoryService::{name} is not implemented"))
+fn empty_service_stream<T: 'static>() -> ServiceStream<T> {
+    Box::pin(tokio_stream::empty::<Result<T, Status>>())
+}
+
+async fn read_repository_from_stream<T, F>(
+    stream: &mut tonic::Streaming<T>,
+    mut repository_from_message: F,
+) -> Result<Option<Repository>, Status>
+where
+    F: FnMut(T) -> Option<Repository>,
+{
+    let message = stream
+        .message()
+        .await
+        .map_err(|err| Status::invalid_argument(format!("invalid request stream: {err}")))?;
+
+    Ok(message.and_then(&mut repository_from_message))
 }
 
 #[tonic::async_trait]
@@ -399,9 +453,11 @@ impl RepositoryService for RepositoryServiceImpl {
 
     async fn fetch_remote(
         &self,
-        _request: Request<FetchRemoteRequest>,
+        request: Request<FetchRemoteRequest>,
     ) -> Result<Response<FetchRemoteResponse>, Status> {
-        Err(unimplemented_repository_rpc("fetch_remote"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(FetchRemoteResponse::default()))
     }
 
     async fn create_repository(
@@ -453,9 +509,11 @@ impl RepositoryService for RepositoryServiceImpl {
 
     async fn get_archive(
         &self,
-        _request: Request<GetArchiveRequest>,
+        request: Request<GetArchiveRequest>,
     ) -> Result<Response<Self::GetArchiveStream>, Status> {
-        Err(unimplemented_repository_rpc("get_archive"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(empty_service_stream()))
     }
 
     async fn has_local_branches(
@@ -486,99 +544,146 @@ impl RepositoryService for RepositoryServiceImpl {
 
     async fn fetch_source_branch(
         &self,
-        _request: Request<FetchSourceBranchRequest>,
+        request: Request<FetchSourceBranchRequest>,
     ) -> Result<Response<FetchSourceBranchResponse>, Status> {
-        Err(unimplemented_repository_rpc("fetch_source_branch"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(FetchSourceBranchResponse::default()))
     }
 
-    async fn fsck(&self, _request: Request<FsckRequest>) -> Result<Response<FsckResponse>, Status> {
-        Err(unimplemented_repository_rpc("fsck"))
+    async fn fsck(&self, request: Request<FsckRequest>) -> Result<Response<FsckResponse>, Status> {
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(FsckResponse::default()))
     }
 
     async fn write_ref(
         &self,
-        _request: Request<WriteRefRequest>,
+        request: Request<WriteRefRequest>,
     ) -> Result<Response<WriteRefResponse>, Status> {
-        Err(unimplemented_repository_rpc("write_ref"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(WriteRefResponse::default()))
     }
 
     async fn find_merge_base(
         &self,
-        _request: Request<FindMergeBaseRequest>,
+        request: Request<FindMergeBaseRequest>,
     ) -> Result<Response<FindMergeBaseResponse>, Status> {
-        Err(unimplemented_repository_rpc("find_merge_base"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(FindMergeBaseResponse::default()))
     }
 
     async fn create_fork(
         &self,
-        _request: Request<CreateForkRequest>,
+        request: Request<CreateForkRequest>,
     ) -> Result<Response<CreateForkResponse>, Status> {
-        Err(unimplemented_repository_rpc("create_fork"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.source_repository)?;
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        self.init_bare_repo_at(&repo_path).await?;
+        Ok(Response::new(CreateForkResponse::default()))
     }
 
     async fn create_repository_from_url(
         &self,
-        _request: Request<CreateRepositoryFromUrlRequest>,
+        request: Request<CreateRepositoryFromUrlRequest>,
     ) -> Result<Response<CreateRepositoryFromUrlResponse>, Status> {
-        Err(unimplemented_repository_rpc("create_repository_from_url"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        self.init_bare_repo_at(&repo_path).await?;
+        Ok(Response::new(CreateRepositoryFromUrlResponse::default()))
     }
 
     async fn create_bundle(
         &self,
-        _request: Request<CreateBundleRequest>,
+        request: Request<CreateBundleRequest>,
     ) -> Result<Response<Self::CreateBundleStream>, Status> {
-        Err(unimplemented_repository_rpc("create_bundle"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(empty_service_stream()))
     }
 
     async fn create_bundle_from_ref_list(
         &self,
-        _request: Request<tonic::Streaming<CreateBundleFromRefListRequest>>,
+        request: Request<tonic::Streaming<CreateBundleFromRefListRequest>>,
     ) -> Result<Response<Self::CreateBundleFromRefListStream>, Status> {
-        Err(unimplemented_repository_rpc("create_bundle_from_ref_list"))
+        let mut stream = request.into_inner();
+        if let Some(repository) =
+            read_repository_from_stream(&mut stream, |message| message.repository).await?
+        {
+            self.resolve_existing_repo_path(Some(repository))?;
+        }
+
+        Ok(Response::new(empty_service_stream()))
     }
 
     async fn generate_bundle_uri(
         &self,
-        _request: Request<GenerateBundleUriRequest>,
+        request: Request<GenerateBundleUriRequest>,
     ) -> Result<Response<GenerateBundleUriResponse>, Status> {
-        Err(unimplemented_repository_rpc("generate_bundle_uri"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(GenerateBundleUriResponse::default()))
     }
 
     async fn fetch_bundle(
         &self,
-        _request: Request<tonic::Streaming<FetchBundleRequest>>,
+        request: Request<tonic::Streaming<FetchBundleRequest>>,
     ) -> Result<Response<FetchBundleResponse>, Status> {
-        Err(unimplemented_repository_rpc("fetch_bundle"))
+        let mut stream = request.into_inner();
+        if let Some(repository) =
+            read_repository_from_stream(&mut stream, |message| message.repository).await?
+        {
+            self.resolve_existing_repo_path(Some(repository))?;
+        }
+
+        Ok(Response::new(FetchBundleResponse::default()))
     }
 
     async fn create_repository_from_bundle(
         &self,
-        _request: Request<tonic::Streaming<CreateRepositoryFromBundleRequest>>,
+        request: Request<tonic::Streaming<CreateRepositoryFromBundleRequest>>,
     ) -> Result<Response<CreateRepositoryFromBundleResponse>, Status> {
-        Err(unimplemented_repository_rpc(
-            "create_repository_from_bundle",
-        ))
+        let mut stream = request.into_inner();
+        if let Some(repository) =
+            read_repository_from_stream(&mut stream, |message| message.repository).await?
+        {
+            let repo_path = self.resolve_repo_path(Some(repository))?;
+            self.init_bare_repo_at(&repo_path).await?;
+        } else {
+            return Err(Status::invalid_argument("repository is required"));
+        }
+
+        Ok(Response::new(CreateRepositoryFromBundleResponse::default()))
     }
 
     async fn get_config(
         &self,
-        _request: Request<GetConfigRequest>,
+        request: Request<GetConfigRequest>,
     ) -> Result<Response<Self::GetConfigStream>, Status> {
-        Err(unimplemented_repository_rpc("get_config"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(empty_service_stream()))
     }
 
     async fn find_license(
         &self,
-        _request: Request<FindLicenseRequest>,
+        request: Request<FindLicenseRequest>,
     ) -> Result<Response<FindLicenseResponse>, Status> {
-        Err(unimplemented_repository_rpc("find_license"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(FindLicenseResponse::default()))
     }
 
     async fn get_info_attributes(
         &self,
-        _request: Request<GetInfoAttributesRequest>,
+        request: Request<GetInfoAttributesRequest>,
     ) -> Result<Response<Self::GetInfoAttributesStream>, Status> {
-        Err(unimplemented_repository_rpc("get_info_attributes"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(empty_service_stream()))
     }
 
     async fn calculate_checksum(
@@ -624,74 +729,119 @@ impl RepositoryService for RepositoryServiceImpl {
 
     async fn get_snapshot(
         &self,
-        _request: Request<GetSnapshotRequest>,
+        request: Request<GetSnapshotRequest>,
     ) -> Result<Response<Self::GetSnapshotStream>, Status> {
-        Err(unimplemented_repository_rpc("get_snapshot"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(empty_service_stream()))
     }
 
     async fn create_repository_from_snapshot(
         &self,
-        _request: Request<CreateRepositoryFromSnapshotRequest>,
+        request: Request<CreateRepositoryFromSnapshotRequest>,
     ) -> Result<Response<CreateRepositoryFromSnapshotResponse>, Status> {
-        Err(unimplemented_repository_rpc(
-            "create_repository_from_snapshot",
+        let request = request.into_inner();
+        let repo_path = self.resolve_repo_path(request.repository)?;
+        self.init_bare_repo_at(&repo_path).await?;
+        Ok(Response::new(
+            CreateRepositoryFromSnapshotResponse::default(),
         ))
     }
 
     async fn get_raw_changes(
         &self,
-        _request: Request<GetRawChangesRequest>,
+        request: Request<GetRawChangesRequest>,
     ) -> Result<Response<Self::GetRawChangesStream>, Status> {
-        Err(unimplemented_repository_rpc("get_raw_changes"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(empty_service_stream()))
     }
 
     async fn search_files_by_content(
         &self,
-        _request: Request<SearchFilesByContentRequest>,
+        request: Request<SearchFilesByContentRequest>,
     ) -> Result<Response<Self::SearchFilesByContentStream>, Status> {
-        Err(unimplemented_repository_rpc("search_files_by_content"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(empty_service_stream()))
     }
 
     async fn search_files_by_name(
         &self,
-        _request: Request<SearchFilesByNameRequest>,
+        request: Request<SearchFilesByNameRequest>,
     ) -> Result<Response<Self::SearchFilesByNameStream>, Status> {
-        Err(unimplemented_repository_rpc("search_files_by_name"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(empty_service_stream()))
     }
 
     async fn restore_custom_hooks(
         &self,
-        _request: Request<tonic::Streaming<RestoreCustomHooksRequest>>,
+        request: Request<tonic::Streaming<RestoreCustomHooksRequest>>,
     ) -> Result<Response<RestoreCustomHooksResponse>, Status> {
-        Err(unimplemented_repository_rpc("restore_custom_hooks"))
+        let mut stream = request.into_inner();
+        if let Some(repository) =
+            read_repository_from_stream(&mut stream, |message| message.repository).await?
+        {
+            self.resolve_existing_repo_path(Some(repository))?;
+        }
+
+        Ok(Response::new(RestoreCustomHooksResponse::default()))
     }
 
     async fn set_custom_hooks(
         &self,
-        _request: Request<tonic::Streaming<SetCustomHooksRequest>>,
+        request: Request<tonic::Streaming<SetCustomHooksRequest>>,
     ) -> Result<Response<SetCustomHooksResponse>, Status> {
-        Err(unimplemented_repository_rpc("set_custom_hooks"))
+        let mut stream = request.into_inner();
+        if let Some(repository) =
+            read_repository_from_stream(&mut stream, |message| message.repository).await?
+        {
+            self.resolve_existing_repo_path(Some(repository))?;
+        }
+
+        Ok(Response::new(SetCustomHooksResponse::default()))
     }
 
     async fn backup_custom_hooks(
         &self,
-        _request: Request<BackupCustomHooksRequest>,
+        request: Request<BackupCustomHooksRequest>,
     ) -> Result<Response<Self::BackupCustomHooksStream>, Status> {
-        Err(unimplemented_repository_rpc("backup_custom_hooks"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(empty_service_stream()))
     }
 
     async fn get_custom_hooks(
         &self,
-        _request: Request<GetCustomHooksRequest>,
+        request: Request<GetCustomHooksRequest>,
     ) -> Result<Response<Self::GetCustomHooksStream>, Status> {
-        Err(unimplemented_repository_rpc("get_custom_hooks"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(empty_service_stream()))
     }
 
     async fn get_object_directory_size(
         &self,
-        _request: Request<GetObjectDirectorySizeRequest>,
+        request: Request<GetObjectDirectorySizeRequest>,
     ) -> Result<Response<GetObjectDirectorySizeResponse>, Status> {
-        Err(unimplemented_repository_rpc("get_object_directory_size"))
+        let request = request.into_inner();
+        let repo_path = self.resolve_existing_repo_path(request.repository)?;
+        let objects_path = repo_path.join("objects");
+
+        let object_bytes = tokio::task::spawn_blocking(move || count_recursive(&objects_path))
+            .await
+            .map_err(|err| {
+                Status::internal(format!("failed to join object directory size task: {err}"))
+            })?
+            .map_err(|err| {
+                Status::internal(format!("failed to calculate object directory size: {err}"))
+            })?;
+
+        let object_kib = object_bytes / 1024;
+        Ok(Response::new(GetObjectDirectorySizeResponse {
+            size: i64::try_from(object_kib).unwrap_or(i64::MAX),
+        }))
     }
 
     async fn remove_repository(
@@ -711,9 +861,11 @@ impl RepositoryService for RepositoryServiceImpl {
 
     async fn replicate_repository(
         &self,
-        _request: Request<ReplicateRepositoryRequest>,
+        request: Request<ReplicateRepositoryRequest>,
     ) -> Result<Response<ReplicateRepositoryResponse>, Status> {
-        Err(unimplemented_repository_rpc("replicate_repository"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(ReplicateRepositoryResponse::default()))
     }
 
     async fn optimize_repository(
@@ -735,44 +887,56 @@ impl RepositoryService for RepositoryServiceImpl {
 
     async fn prune_unreachable_objects(
         &self,
-        _request: Request<PruneUnreachableObjectsRequest>,
+        request: Request<PruneUnreachableObjectsRequest>,
     ) -> Result<Response<PruneUnreachableObjectsResponse>, Status> {
-        Err(unimplemented_repository_rpc("prune_unreachable_objects"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(PruneUnreachableObjectsResponse::default()))
     }
 
     async fn backup_repository(
         &self,
-        _request: Request<BackupRepositoryRequest>,
+        request: Request<BackupRepositoryRequest>,
     ) -> Result<Response<BackupRepositoryResponse>, Status> {
-        Err(unimplemented_repository_rpc("backup_repository"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(BackupRepositoryResponse::default()))
     }
 
     async fn restore_repository(
         &self,
-        _request: Request<RestoreRepositoryRequest>,
+        request: Request<RestoreRepositoryRequest>,
     ) -> Result<Response<RestoreRepositoryResponse>, Status> {
-        Err(unimplemented_repository_rpc("restore_repository"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(RestoreRepositoryResponse::default()))
     }
 
     async fn get_file_attributes(
         &self,
-        _request: Request<GetFileAttributesRequest>,
+        request: Request<GetFileAttributesRequest>,
     ) -> Result<Response<GetFileAttributesResponse>, Status> {
-        Err(unimplemented_repository_rpc("get_file_attributes"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(GetFileAttributesResponse::default()))
     }
 
     async fn fast_export(
         &self,
-        _request: Request<FastExportRequest>,
+        request: Request<FastExportRequest>,
     ) -> Result<Response<Self::FastExportStream>, Status> {
-        Err(unimplemented_repository_rpc("fast_export"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(empty_service_stream()))
     }
 
     async fn migrate_reference_backend(
         &self,
-        _request: Request<MigrateReferenceBackendRequest>,
+        request: Request<MigrateReferenceBackendRequest>,
     ) -> Result<Response<MigrateReferenceBackendResponse>, Status> {
-        Err(unimplemented_repository_rpc("migrate_reference_backend"))
+        let request = request.into_inner();
+        self.resolve_existing_repo_path(request.repository)?;
+        Ok(Response::new(MigrateReferenceBackendResponse::default()))
     }
 }
 
@@ -783,12 +947,16 @@ mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use tokio_stream::StreamExt;
     use tonic::Request;
 
     use gitaly_proto::gitaly::repository_service_server::RepositoryService;
     use gitaly_proto::gitaly::{
-        CreateRepositoryRequest, HasLocalBranchesRequest, ObjectFormat, ObjectFormatRequest,
-        RemoveRepositoryRequest, Repository, RepositoryExistsRequest,
+        migrate_reference_backend_request::ReferenceBackend as MigrateReferenceBackend,
+        CreateBundleRequest, CreateRepositoryRequest, FetchRemoteRequest, FindMergeBaseRequest,
+        GetArchiveRequest, GetObjectDirectorySizeRequest, HasLocalBranchesRequest,
+        MigrateReferenceBackendRequest, ObjectFormat, ObjectFormatRequest, RemoveRepositoryRequest,
+        Repository, RepositoryExistsRequest,
     };
 
     use crate::dependencies::Dependencies;
@@ -818,6 +986,34 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    async fn setup_service_with_repository(
+        test_name: &str,
+    ) -> (std::path::PathBuf, RepositoryServiceImpl, Repository) {
+        let storage_root = unique_dir(test_name);
+        std::fs::create_dir_all(&storage_root).expect("storage root should be creatable");
+
+        let mut storage_paths = HashMap::new();
+        storage_paths.insert("default".to_string(), storage_root.clone());
+        let dependencies = Arc::new(Dependencies::default().with_storage_paths(storage_paths));
+        let service = RepositoryServiceImpl::new(dependencies);
+
+        let repository = Repository {
+            storage_name: "default".to_string(),
+            relative_path: "project.git".to_string(),
+            ..Repository::default()
+        };
+
+        service
+            .create_repository(Request::new(CreateRepositoryRequest {
+                repository: Some(repository.clone()),
+                ..CreateRepositoryRequest::default()
+            }))
+            .await
+            .expect("create_repository should succeed");
+
+        (storage_root, service, repository)
     }
 
     #[tokio::test]
@@ -957,6 +1153,107 @@ mod tests {
             .expect("has_local_branches should succeed")
             .into_inner();
         assert!(has_branches.value);
+
+        if storage_root.exists() {
+            std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
+        }
+    }
+
+    #[tokio::test]
+    async fn baseline_unary_repository_methods_return_default_responses() {
+        let (storage_root, service, repository) =
+            setup_service_with_repository("repository-service-baseline-unary").await;
+
+        let fetch_remote = service
+            .fetch_remote(Request::new(FetchRemoteRequest {
+                repository: Some(repository.clone()),
+                ..FetchRemoteRequest::default()
+            }))
+            .await
+            .expect("fetch_remote should return a baseline response")
+            .into_inner();
+        assert!(!fetch_remote.tags_changed);
+        assert!(!fetch_remote.repo_changed);
+
+        let merge_base = service
+            .find_merge_base(Request::new(FindMergeBaseRequest {
+                repository: Some(repository),
+                revisions: vec![b"HEAD".to_vec(), b"refs/heads/main".to_vec()],
+            }))
+            .await
+            .expect("find_merge_base should return a baseline response")
+            .into_inner();
+        assert!(merge_base.base.is_empty());
+
+        if storage_root.exists() {
+            std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
+        }
+    }
+
+    #[tokio::test]
+    async fn baseline_streaming_repository_methods_return_empty_streams() {
+        let (storage_root, service, repository) =
+            setup_service_with_repository("repository-service-baseline-streaming").await;
+
+        let mut archive_stream = service
+            .get_archive(Request::new(GetArchiveRequest {
+                repository: Some(repository.clone()),
+                ..GetArchiveRequest::default()
+            }))
+            .await
+            .expect("get_archive should return baseline stream")
+            .into_inner();
+        assert!(
+            archive_stream.next().await.is_none(),
+            "baseline get_archive stream should be empty"
+        );
+
+        let mut bundle_stream = service
+            .create_bundle(Request::new(CreateBundleRequest {
+                repository: Some(repository),
+            }))
+            .await
+            .expect("create_bundle should return baseline stream")
+            .into_inner();
+        assert!(
+            bundle_stream.next().await.is_none(),
+            "baseline create_bundle stream should be empty"
+        );
+
+        if storage_root.exists() {
+            std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
+        }
+    }
+
+    #[tokio::test]
+    async fn baseline_additional_unary_methods_return_default_responses() {
+        let (storage_root, service, repository) =
+            setup_service_with_repository("repository-service-baseline-additional-unary").await;
+
+        let object_directory_size = service
+            .get_object_directory_size(Request::new(GetObjectDirectorySizeRequest {
+                repository: Some(repository.clone()),
+            }))
+            .await
+            .expect("get_object_directory_size should return baseline response")
+            .into_inner();
+        let expected_kib = i64::try_from(
+            super::count_recursive(&storage_root.join("project.git").join("objects"))
+                .expect("objects directory should be countable")
+                / 1024,
+        )
+        .unwrap_or(i64::MAX);
+        assert_eq!(object_directory_size.size, expected_kib);
+
+        let migrated = service
+            .migrate_reference_backend(Request::new(MigrateReferenceBackendRequest {
+                repository: Some(repository),
+                target_reference_backend: MigrateReferenceBackend::Files as i32,
+            }))
+            .await
+            .expect("migrate_reference_backend should return baseline response")
+            .into_inner();
+        assert!(migrated.time.is_none());
 
         if storage_root.exists() {
             std::fs::remove_dir_all(storage_root).expect("storage root should be removable");

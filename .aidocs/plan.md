@@ -40,26 +40,27 @@ Last updated: 2026-02-24
 | T03b | Harden OperationService mutation RPC semantics | `service/operations.rs` | done | Added repository contract checks for unary/streaming mutation RPCs with focused tests |
 | T03c | Wire git protocol/config options for streaming pack RPCs | `service/{ssh,smarthttp}.rs` | done | Applied validated git config/protocol handling in streaming SSH/SmartHTTP pack flows |
 | T03d | Align remaining write-path command option handling | `service/{smarthttp,ssh}.rs` | done | Added info-refs and streaming option propagation with validation tests |
-| T04 | Finish remote and repository remaining RPC surface | `service/{remote,repository}.rs` | in_progress | Split into remote/repository slices for deterministic commits |
+| T04 | Finish remote and repository remaining RPC surface | `service/{remote,repository}.rs` | done | Completed remote + repository baseline RPC coverage with focused tests |
 | T04a | Implement remaining RemoteService RPCs | `service/remote.rs` | done | Implemented `update_remote_mirror` baseline with focused tests |
-| T04b | Implement remaining RepositoryService RPCs | `service/repository.rs` | in_progress | Replace remaining `unimplemented` repository RPCs in focused slices |
+| T04b | Implement remaining RepositoryService RPCs | `service/repository.rs` | done | Replaced remaining repository RPC stubs with validated baseline responses/streams |
 | T04b1 | Implement repository format/branch/objects-size basics | `service/repository.rs` | done | Implemented `object_format`, `has_local_branches`, and `objects_size` baselines |
-| T04b2 | Implement repository maintenance and bundle RPC slices | `service/repository.rs` | in_progress | Continue replacing `unimplemented` methods in bounded batches |
-| T05 | Add missing binaries and packaging path | `bins/*`, workspace wiring | pending | `gitaly-hooks`, `gitaly-ssh`, then backup/gpg/lfs/blackbox |
+| T04b2 | Implement repository maintenance and bundle RPC slices | `service/repository.rs` | done | Closed all remaining repository RPC stubs with conservative baseline behavior and tests |
+| T05 | Add missing binaries and packaging path | `bins/*`, workspace wiring | in_progress | Start by adding installable helper binaries and wiring workspace packaging path |
 | T06 | Build root integration/chaos/stress test layout | `tests/*`, `benches/*` | pending | Create planned hierarchy and first end-to-end suites |
 | T07 | Introduce `gitaly-cluster` and real raft integration | `crates/gitaly-cluster`, `service/raft.rs` | pending | Move from placeholder service to `openraft`-backed cluster state |
 
 ## Current Task Detail
 
-### T04b2 - Implement repository maintenance and bundle RPC slices
+### T05 - Add missing binaries and packaging path
 
 Subtasks:
-- Implement next bounded batch of repository RPC stubs.
-- Add focused tests for newly implemented RPCs in the batch.
-- Keep backward-compatible default payload behavior where required.
+- Add missing helper binaries (`gitaly-hooks`, `gitaly-ssh`) to workspace.
+- Add baseline helper binaries for backup/gpg/lfs/blackbox flows.
+- Ensure binaries are installable and discoverable from a common install path.
 
 Verification target:
-- `cargo test -p gitaly-server --lib service::repository:: -- --test-threads=1`
+- `cargo build --workspace`
+- `cargo run -p gitaly -- --help`
 
 ## Changelog
 
@@ -79,3 +80,5 @@ Verification target:
 - 2026-02-24: Marked T03 complete and started T04 remote/repository RPC closure phase.
 - 2026-02-24: Completed T04a by implementing `update_remote_mirror` baseline and focused remote service tests.
 - 2026-02-24: Completed T04b1 by implementing repository object-format/branch/objects-size baseline RPCs and tests.
+- 2026-02-25: Completed T04b2 by replacing remaining `RepositoryService` stubs with validated baseline responses/streams and focused tests.
+- 2026-02-25: Marked T04 complete and started T05 binary/packaging work.

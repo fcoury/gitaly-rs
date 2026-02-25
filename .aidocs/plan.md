@@ -45,22 +45,22 @@ Last updated: 2026-02-24
 | T04b | Implement remaining RepositoryService RPCs | `service/repository.rs` | done | Replaced remaining repository RPC stubs with validated baseline responses/streams |
 | T04b1 | Implement repository format/branch/objects-size basics | `service/repository.rs` | done | Implemented `object_format`, `has_local_branches`, and `objects_size` baselines |
 | T04b2 | Implement repository maintenance and bundle RPC slices | `service/repository.rs` | done | Closed all remaining repository RPC stubs with conservative baseline behavior and tests |
-| T05 | Add missing binaries and packaging path | `bins/*`, workspace wiring | in_progress | Start by adding installable helper binaries and wiring workspace packaging path |
-| T06 | Build root integration/chaos/stress test layout | `tests/*`, `benches/*` | pending | Create planned hierarchy and first end-to-end suites |
+| T05 | Add missing binaries and packaging path | `bins/*`, workspace wiring | done | Added helper binaries and staging script for a shared install destination |
+| T06 | Build root integration/chaos/stress test layout | `tests/*`, `benches/*` | in_progress | Create planned hierarchy and first end-to-end suites |
 | T07 | Introduce `gitaly-cluster` and real raft integration | `crates/gitaly-cluster`, `service/raft.rs` | pending | Move from placeholder service to `openraft`-backed cluster state |
 
 ## Current Task Detail
 
-### T05 - Add missing binaries and packaging path
+### T06 - Build root integration/chaos/stress test layout
 
 Subtasks:
-- Add missing helper binaries (`gitaly-hooks`, `gitaly-ssh`) to workspace.
-- Add baseline helper binaries for backup/gpg/lfs/blackbox flows.
-- Ensure binaries are installable and discoverable from a common install path.
+- Create root `tests/` hierarchy with shared support harness.
+- Add first end-to-end integration smoke test for local server lifecycle.
+- Add initial chaos/stress placeholders and runnable baseline checks.
 
 Verification target:
-- `cargo build --workspace`
-- `cargo run -p gitaly -- --help`
+- `cargo test --test integration_server_info`
+- `cargo test --test chaos_stream_shutdown`
 
 ## Changelog
 
@@ -82,3 +82,5 @@ Verification target:
 - 2026-02-24: Completed T04b1 by implementing repository object-format/branch/objects-size baseline RPCs and tests.
 - 2026-02-25: Completed T04b2 by replacing remaining `RepositoryService` stubs with validated baseline responses/streams and focused tests.
 - 2026-02-25: Marked T04 complete and started T05 binary/packaging work.
+- 2026-02-25: Completed T05 by adding root helper binaries (`gitaly-hooks`, `gitaly-ssh`, `gitaly-backup`, `gitaly-gpg`, `gitaly-lfs-smudge`, `gitaly-blackbox`) and a staging script for shared install paths.
+- 2026-02-25: Marked T05 complete and started T06 root test hierarchy work.

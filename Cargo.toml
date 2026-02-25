@@ -64,3 +64,31 @@ anyhow.workspace = true
 gitaly-config = { path = "crates/gitaly-config" }
 gitaly-server = { path = "crates/gitaly-server" }
 tokio = { workspace = true, features = ["signal"] }
+
+[[bin]]
+name = "gitaly-rs"
+path = "src/main.rs"
+
+[[bin]]
+name = "gitaly-hooks"
+path = "bins/gitaly-hooks.rs"
+
+[[bin]]
+name = "gitaly-ssh"
+path = "bins/gitaly-ssh.rs"
+
+[[bin]]
+name = "gitaly-backup"
+path = "bins/gitaly-backup.rs"
+
+[[bin]]
+name = "gitaly-gpg"
+path = "bins/gitaly-gpg.rs"
+
+[[bin]]
+name = "gitaly-lfs-smudge"
+path = "bins/gitaly-lfs-smudge.rs"
+
+[[bin]]
+name = "gitaly-blackbox"
+path = "bins/gitaly-blackbox.rs"

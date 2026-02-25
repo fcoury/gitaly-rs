@@ -131,9 +131,12 @@ impl Drop for TestServer {
     }
 }
 
-pub async fn start_test_server(prefix: &str) -> TestServer {
+async fn start_test_server_with<F>(prefix: &str, build: F) -> TestServer
+where
+    F: FnOnce(&TestDirs) -> Arc<Dependencies>,
+{
     let dirs = create_temp_runtime_storage_dirs(prefix);
-    let dependencies = build_dependencies(&dirs.storage_dir);
+    let dependencies = build(&dirs);
     let runtime_paths = bootstrap_runtime_paths(&dirs.runtime_dir);
     let router = GitalyServer::build_router_with_dependencies_and_runtime_paths(
         Arc::clone(&dependencies),
@@ -165,6 +168,17 @@ pub async fn start_test_server(prefix: &str) -> TestServer {
         shutdown_tx: Some(shutdown_tx),
         server_task: Some(server_task),
     }
+}
+
+pub async fn start_test_server(prefix: &str) -> TestServer {
+    start_test_server_with(prefix, |dirs| build_dependencies(&dirs.storage_dir)).await
+}
+
+pub async fn start_test_server_with_dependencies(
+    prefix: &str,
+    dependencies: Arc<Dependencies>,
+) -> TestServer {
+    start_test_server_with(prefix, |_| dependencies).await
 }
 
 async fn connect_with_retries<Client, Connector, Fut>(

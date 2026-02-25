@@ -1,0 +1,57 @@
+name: test-matrix
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  workspace-tests:
+    name: workspace-tests (${{ matrix.os }}, ${{ matrix.toolchain }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        toolchain: [stable, nightly]
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+
+      - name: install protoc
+        uses: arduino/setup-protoc@v3
+
+      - name: cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: run workspace tests
+        run: cargo test --workspace -- --test-threads=1
+
+  stress-gate:
+    name: stress-gate (ubuntu, stable)
+    runs-on: ubuntu-latest
+    needs: workspace-tests
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: install protoc
+        uses: arduino/setup-protoc@v3
+
+      - name: cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: run stress suite
+        run: ./scripts/run-stress-suite.sh

@@ -28,19 +28,16 @@ Last updated: 2026-02-25
 | T10 | Execute Phase 3 durability drills | write path + storage durability | done | Added rollback/corruption durability drills for snapshot restore and backup pointer edge cases (including vanity backup roots) |
 | T11 | Run Phase 4 load/stress gate | load harness + stress profiles | done | Added multi-benchmark stress gate (`repository_exists`, `repository_metadata`, `server_info`) with scripted threshold checks and artifact logging |
 | T12 | Deepen Phase 9 cluster implementation | `gitaly-cluster`, `service/raft.rs` | done | Added persistent cluster-state snapshot/load lifecycle and deterministic raft-service state-path wiring |
-| T13 | Expand Phase 10 test program | `tests/*`, CI matrix, coverage | in_progress | Grow integration/chaos/compat/reliability suites and nightly matrix |
+| T13 | Expand Phase 10 test program | `tests/*`, CI matrix, coverage | done | Added server-surface integration coverage and a CI test matrix (stable/nightly + stress gate) |
 
 ## Current Task Detail
 
-### T13 - Expand Phase 10 test program
+### Queue Status
 
-Subtasks:
-- Expand integration coverage for server RPCs beyond `ServerInfo`.
-- Add reliability coverage for startup/readiness/signature behavior across dependency states.
-- Introduce CI matrix coverage for the expanded integration suites and stress gate checks.
+- All tasks in this tracker (`T08` through `T13`) are complete.
+- Follow-up work should start in a new active tracker file if additional phases are queued.
 
 Verification target:
-- Focused integration/reliability test suite coverage.
 - `cargo test --workspace -- --test-threads=1`
 
 ## Changelog
@@ -61,3 +58,6 @@ Verification target:
 - 2026-02-25: Completed T12 by adding persisted `ClusterStateManager` state snapshots/reload, deterministic storage-root-backed state-file selection in `RaftServiceImpl`, and restart-focused cluster persistence tests.
 - 2026-02-25: Verified T12 with `cargo test -p gitaly-cluster -- --test-threads=1`, `cargo test -p gitaly-server --lib service::raft::tests:: -- --test-threads=1`, and `cargo test --workspace -- --test-threads=1`.
 - 2026-02-25: Marked T12 complete and started T13 test-program expansion.
+- 2026-02-25: Completed T13 by adding integration coverage for `DiskStatistics`, `ReadinessCheck`, and `ServerSignature`, plus a GitHub Actions test matrix with stable/nightly lanes and a stress-gate job.
+- 2026-02-25: Verified T13 with `cargo test --test integration_server_surfaces -- --test-threads=1`, `cargo test --test integration_server_info -- --test-threads=1`, and `cargo test --workspace -- --test-threads=1`.
+- 2026-02-25: Marked T13 complete and closed the active T08–T13 tracker queue.

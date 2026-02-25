@@ -103,3 +103,11 @@ path = "bins/gitaly-blackbox.rs"
 [[bench]]
 name = "stress_repository_exists"
 harness = false
+
+[[bench]]
+name = "stress_repository_metadata"
+harness = false
+
+[[bench]]
+name = "stress_server_info"
+harness = false

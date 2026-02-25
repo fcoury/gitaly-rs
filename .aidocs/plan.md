@@ -26,21 +26,21 @@ Last updated: 2026-02-25
 | T08 | Close remaining Phase 8 API/tooling gaps | `service/*`, `bins/*`, tooling | done | Closed highest-impact gaps: helper binaries now functional and repository backup/restore RPCs implement real snapshot semantics |
 | T09 | Complete Phase 5 observability rollout | middleware + service surfaces | done | Structured logs, metrics, and correlation propagation now cover middleware accept/reject paths with per-reason counters |
 | T10 | Execute Phase 3 durability drills | write path + storage durability | done | Added rollback/corruption durability drills for snapshot restore and backup pointer edge cases (including vanity backup roots) |
-| T11 | Run Phase 4 load/stress gate | load harness + stress profiles | in_progress | Saturation/soak tests with explicit pass/fail SLO thresholds |
-| T12 | Deepen Phase 9 cluster implementation | `gitaly-cluster`, `service/raft.rs` | pending | Move from baseline state manager to deeper OpenRaft lifecycle and persistence |
+| T11 | Run Phase 4 load/stress gate | load harness + stress profiles | done | Added multi-benchmark stress gate (`repository_exists`, `repository_metadata`, `server_info`) with scripted threshold checks and artifact logging |
+| T12 | Deepen Phase 9 cluster implementation | `gitaly-cluster`, `service/raft.rs` | in_progress | Move from baseline state manager to deeper OpenRaft lifecycle and persistence |
 | T13 | Expand Phase 10 test program | `tests/*`, CI matrix, coverage | pending | Grow integration/chaos/compat/reliability suites and nightly matrix |
 
 ## Current Task Detail
 
-### T11 - Run Phase 4 load/stress gate
+### T12 - Deepen Phase 9 cluster implementation
 
 Subtasks:
-- Expand stress benches beyond repository-exists to include read-path and pack streaming pressure.
-- Add a repeatable stress gate runner that records throughput/latency artifacts with explicit thresholds.
-- Document load profile, pass/fail criteria, and execution workflow for local and CI usage.
+- Persist cluster state snapshots to disk and load them at startup.
+- Add lifecycle hooks around join/message/snapshot flows to expose persisted state behavior.
+- Expand raft/cluster tests to validate restart recovery and persistence invariants.
 
 Verification target:
-- Focused stress benches and gate runner checks.
+- Focused `gitaly-cluster` + `service::raft` tests.
 - `cargo test --workspace -- --test-threads=1`
 
 ## Changelog
@@ -55,3 +55,6 @@ Verification target:
 - 2026-02-25: Completed T10 by adding snapshot rollback durability coverage, backup pointer corruption/missing-snapshot restore drills, and vanity backup-root round-trip coverage.
 - 2026-02-25: Verified T10 with `cargo test -p gitaly-storage snapshot::tests:: -- --test-threads=1`, `cargo test -p gitaly-server --lib service::repository::tests:: -- --test-threads=1`, and `cargo test --workspace -- --test-threads=1`.
 - 2026-02-25: Marked T10 complete and started T11 load/stress gate work.
+- 2026-02-25: Completed T11 by adding `stress_repository_metadata` and `stress_server_info` benches, normalizing stress output format, and introducing `scripts/run-stress-suite.sh` plus `docs/stress-gate.md`.
+- 2026-02-25: Verified T11 with `./scripts/run-stress-suite.sh` and `cargo test --workspace -- --test-threads=1`.
+- 2026-02-25: Marked T11 complete and started T12 cluster-depth work.

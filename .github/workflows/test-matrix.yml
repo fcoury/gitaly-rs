@@ -30,6 +30,8 @@ jobs:
 
       - name: install protoc
         uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
 
       - name: cache cargo
         uses: Swatinem/rust-cache@v2
@@ -52,6 +54,8 @@ jobs:
 
       - name: install protoc
         uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
 
       - name: cache cargo
         uses: Swatinem/rust-cache@v2

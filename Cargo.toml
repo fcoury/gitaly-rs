@@ -65,6 +65,10 @@ gitaly-config = { path = "crates/gitaly-config" }
 gitaly-server = { path = "crates/gitaly-server" }
 tokio = { workspace = true, features = ["signal"] }
 
+[dev-dependencies]
+gitaly-proto = { path = "crates/gitaly-proto" }
+tonic.workspace = true
+
 [[bin]]
 name = "gitaly-rs"
 path = "src/main.rs"
@@ -92,3 +96,7 @@ path = "bins/gitaly-lfs-smudge.rs"
 [[bin]]
 name = "gitaly-blackbox"
 path = "bins/gitaly-blackbox.rs"
+
+[[bench]]
+name = "stress_repository_exists"
+harness = false

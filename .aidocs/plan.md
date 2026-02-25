@@ -46,21 +46,21 @@ Last updated: 2026-02-24
 | T04b1 | Implement repository format/branch/objects-size basics | `service/repository.rs` | done | Implemented `object_format`, `has_local_branches`, and `objects_size` baselines |
 | T04b2 | Implement repository maintenance and bundle RPC slices | `service/repository.rs` | done | Closed all remaining repository RPC stubs with conservative baseline behavior and tests |
 | T05 | Add missing binaries and packaging path | `bins/*`, workspace wiring | done | Added helper binaries and staging script for a shared install destination |
-| T06 | Build root integration/chaos/stress test layout | `tests/*`, `benches/*` | in_progress | Create planned hierarchy and first end-to-end suites |
-| T07 | Introduce `gitaly-cluster` and real raft integration | `crates/gitaly-cluster`, `service/raft.rs` | pending | Move from placeholder service to `openraft`-backed cluster state |
+| T06 | Build root integration/chaos/stress test layout | `tests/*`, `benches/*` | done | Added root support harness, integration/chaos suites, and first stress bench target |
+| T07 | Introduce `gitaly-cluster` and real raft integration | `crates/gitaly-cluster`, `service/raft.rs` | in_progress | Move from placeholder service to `openraft`-backed cluster state |
 
 ## Current Task Detail
 
-### T06 - Build root integration/chaos/stress test layout
+### T07 - Introduce `gitaly-cluster` and real raft integration
 
 Subtasks:
-- Create root `tests/` hierarchy with shared support harness.
-- Add first end-to-end integration smoke test for local server lifecycle.
-- Add initial chaos/stress placeholders and runnable baseline checks.
+- Create `crates/gitaly-cluster` with baseline cluster state and message handling.
+- Wire `RaftServiceImpl` to delegate to cluster state instead of returning placeholders.
+- Add focused raft service/cluster tests for join, message, and metadata flow.
 
 Verification target:
-- `cargo test --test integration_server_info`
-- `cargo test --test chaos_stream_shutdown`
+- `cargo test -p gitaly-cluster`
+- `cargo test -p gitaly-server --lib service::raft:: -- --test-threads=1`
 
 ## Changelog
 
@@ -84,3 +84,5 @@ Verification target:
 - 2026-02-25: Marked T04 complete and started T05 binary/packaging work.
 - 2026-02-25: Completed T05 by adding root helper binaries (`gitaly-hooks`, `gitaly-ssh`, `gitaly-backup`, `gitaly-gpg`, `gitaly-lfs-smudge`, `gitaly-blackbox`) and a staging script for shared install paths.
 - 2026-02-25: Marked T05 complete and started T06 root test hierarchy work.
+- 2026-02-25: Completed T06 by adding root `tests/support` harness, `integration_server_info`, `chaos_stream_shutdown`, and `stress_repository_exists` bench target.
+- 2026-02-25: Marked T06 complete and started T07 cluster/raft integration work.

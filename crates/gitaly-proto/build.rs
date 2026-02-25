@@ -3,6 +3,8 @@ use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+const PROTO_ROOT_ENV: &str = "GITALY_PROTO_ROOT";
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Operation {
     Unknown,
@@ -30,13 +32,14 @@ struct RegistryEntry {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rustc-check-cfg=cfg(gitaly_proto_codegen)");
+    println!("cargo:rerun-if-env-changed={PROTO_ROOT_ENV}");
 
     let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
-    let proto_root = crate_dir.join("../../..").join("proto").canonicalize()?;
     let workspace_proto_root = crate_dir.join("../..").join("proto");
+    let proto_root = resolve_proto_root(&crate_dir, &workspace_proto_root)?;
     let local_proto_root = workspace_proto_root
         .exists()
-        .then(|| workspace_proto_root.canonicalize())
+        .then(|| canonical_or_self(&workspace_proto_root))
         .transpose()?;
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
 
@@ -52,10 +55,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect::<Vec<_>>();
     protos.sort();
 
-    let has_raft_proto = proto_root.join("raftpb/raft.proto").exists()
-        || local_proto_root
-            .as_ref()
-            .is_some_and(|local_root| local_root.join("raftpb/raft.proto").exists());
+    let mut include_paths = Vec::new();
+    push_unique_path(&mut include_paths, proto_root.clone());
+    if let Some(local_proto_root) = &local_proto_root {
+        push_unique_path(&mut include_paths, local_proto_root.clone());
+    }
+
+    let has_raft_proto = include_paths
+        .iter()
+        .any(|include_path| include_path.join("raftpb/raft.proto").exists());
 
     if !has_raft_proto {
         protos.retain(|path| path.file_name() != Some(OsStr::new("cluster.proto")));
@@ -75,13 +83,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (registry_entries, intercepted_methods) = build_registry(&protos)?;
     generate_registry_source(&out_dir, &registry_entries, &intercepted_methods)?;
-
-    let mut include_paths = vec![proto_root.clone()];
-    if let Some(local_proto_root) = &local_proto_root {
-        if local_proto_root != &proto_root {
-            include_paths.push(local_proto_root.clone());
-        }
-    }
 
     match tonic_build::configure()
         .build_server(true)
@@ -107,6 +108,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(())
             }
         }
+    }
+}
+
+fn resolve_proto_root(
+    crate_dir: &Path,
+    workspace_proto_root: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let mut candidates = Vec::new();
+    if let Some(configured_root) = env::var_os(PROTO_ROOT_ENV) {
+        candidates.push(PathBuf::from(configured_root));
+    }
+    candidates.push(workspace_proto_root.to_path_buf());
+    candidates.push(crate_dir.join("../../..").join("proto"));
+
+    for candidate in &candidates {
+        if candidate.is_dir() && has_top_level_proto_files(candidate) {
+            return canonical_or_self(candidate);
+        }
+    }
+
+    let searched = candidates
+        .iter()
+        .map(|candidate| candidate.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "Unable to locate proto root. Searched paths: {searched}. Set `{PROTO_ROOT_ENV}` to a valid `proto` directory."
+    )
+    .into())
+}
+
+fn canonical_or_self(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    match path.canonicalize() {
+        Ok(canonical) => Ok(canonical),
+        Err(_) => Ok(path.to_path_buf()),
+    }
+}
+
+fn has_top_level_proto_files(path: &Path) -> bool {
+    std::fs::read_dir(path).is_ok_and(|entries| {
+        entries.filter_map(Result::ok).any(|entry| {
+            entry.path().extension() == Some(OsStr::new("proto"))
+        })
+    })
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
     }
 }
 

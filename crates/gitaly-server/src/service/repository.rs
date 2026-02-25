@@ -1552,4 +1552,191 @@ mod tests {
             std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
         }
     }
+
+    #[tokio::test]
+    async fn backup_repository_named_and_latest_transitions_update_latest_selection() {
+        let (storage_root, service, repository) =
+            setup_service_with_repository("repository-service-backup-latest-transition").await;
+
+        let repo_path = storage_root.join("project.git");
+        let description_path = repo_path.join("description");
+        let backup_root = storage_root
+            .join(".repository-backups")
+            .join("project.git");
+        let latest_path = backup_root.join("latest");
+
+        std::fs::write(&description_path, b"version-one\n").expect("description should write");
+        service
+            .backup_repository(Request::new(BackupRepositoryRequest {
+                repository: Some(repository.clone()),
+                backup_id: "named-v1".to_string(),
+                ..BackupRepositoryRequest::default()
+            }))
+            .await
+            .expect("named backup should succeed");
+        assert!(
+            backup_root.join("named-v1").is_dir(),
+            "named snapshot should be created"
+        );
+        assert!(
+            latest_path.is_file(),
+            "named backup should create latest pointer file"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&latest_path).expect("latest pointer should be readable"),
+            "named-v1\n"
+        );
+
+        std::fs::write(&description_path, b"version-two\n").expect("description should mutate");
+        service
+            .backup_repository(Request::new(BackupRepositoryRequest {
+                repository: Some(repository.clone()),
+                backup_id: "latest".to_string(),
+                ..BackupRepositoryRequest::default()
+            }))
+            .await
+            .expect("latest backup should succeed");
+        assert!(
+            latest_path.is_dir(),
+            "latest backup should replace pointer file with snapshot directory"
+        );
+
+        std::fs::write(&description_path, b"version-three\n").expect("description should mutate");
+        service
+            .restore_repository(Request::new(RestoreRepositoryRequest {
+                repository: Some(repository),
+                backup_id: String::new(),
+                ..RestoreRepositoryRequest::default()
+            }))
+            .await
+            .expect("restore should resolve latest directory");
+
+        let restored =
+            std::fs::read_to_string(&description_path).expect("description should be readable");
+        assert_eq!(
+            restored, "version-two\n",
+            "restore should select latest directory after pointer cleanup"
+        );
+
+        if storage_root.exists() {
+            std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_repository_with_pointer_to_missing_snapshot_returns_not_found() {
+        let (storage_root, service, repository) =
+            setup_service_with_repository("repository-service-restore-missing-pointed").await;
+
+        let backup_root = storage_root
+            .join(".repository-backups")
+            .join("project.git");
+        service
+            .backup_repository(Request::new(BackupRepositoryRequest {
+                repository: Some(repository.clone()),
+                backup_id: "named-v1".to_string(),
+                ..BackupRepositoryRequest::default()
+            }))
+            .await
+            .expect("named backup should succeed");
+        std::fs::remove_dir_all(backup_root.join("named-v1"))
+            .expect("named snapshot should be removable");
+
+        let error = service
+            .restore_repository(Request::new(RestoreRepositoryRequest {
+                repository: Some(repository),
+                backup_id: String::new(),
+                ..RestoreRepositoryRequest::default()
+            }))
+            .await
+            .expect_err("missing pointed snapshot should fail");
+        assert_eq!(error.code(), tonic::Code::NotFound);
+
+        if storage_root.exists() {
+            std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_repository_with_invalid_latest_pointer_is_rejected() {
+        let (storage_root, service, repository) =
+            setup_service_with_repository("repository-service-restore-invalid-pointer").await;
+
+        let backup_root = storage_root
+            .join(".repository-backups")
+            .join("project.git");
+        std::fs::create_dir_all(&backup_root).expect("backup root should be creatable");
+        std::fs::write(backup_root.join("latest"), "../escape\n")
+            .expect("latest pointer should be writable");
+
+        let error = service
+            .restore_repository(Request::new(RestoreRepositoryRequest {
+                repository: Some(repository),
+                backup_id: String::new(),
+                ..RestoreRepositoryRequest::default()
+            }))
+            .await
+            .expect_err("invalid pointer should fail");
+        assert_eq!(error.code(), tonic::Code::Internal);
+        assert!(
+            error
+                .message()
+                .contains("latest backup pointer contains disallowed path components"),
+            "error should explain pointer safety failure"
+        );
+
+        if storage_root.exists() {
+            std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
+        }
+    }
+
+    #[tokio::test]
+    async fn backup_and_restore_repository_support_vanity_repository_backup_root() {
+        let (storage_root, service, repository) =
+            setup_service_with_repository("repository-service-backup-restore-vanity").await;
+
+        let repo_path = storage_root.join("project.git");
+        let description_path = repo_path.join("description");
+        let vanity_repository = Repository {
+            storage_name: "default".to_string(),
+            relative_path: "vanity/project.git".to_string(),
+            ..Repository::default()
+        };
+        let vanity_backup_root = storage_root.join("vanity").join("project.git");
+
+        std::fs::write(&description_path, b"vanity-original\n")
+            .expect("description should be writable");
+        service
+            .backup_repository(Request::new(BackupRepositoryRequest {
+                repository: Some(repository.clone()),
+                vanity_repository: Some(vanity_repository.clone()),
+                backup_id: "vanity-v1".to_string(),
+                ..BackupRepositoryRequest::default()
+            }))
+            .await
+            .expect("vanity backup should succeed");
+        assert!(
+            vanity_backup_root.join("vanity-v1").is_dir(),
+            "snapshot should be stored under vanity backup root"
+        );
+
+        std::fs::write(&description_path, b"vanity-mutated\n").expect("description should mutate");
+        service
+            .restore_repository(Request::new(RestoreRepositoryRequest {
+                repository: Some(repository),
+                vanity_repository: Some(vanity_repository),
+                backup_id: "vanity-v1".to_string(),
+                ..RestoreRepositoryRequest::default()
+            }))
+            .await
+            .expect("vanity restore should succeed");
+
+        let restored =
+            std::fs::read_to_string(&description_path).expect("description should be readable");
+        assert_eq!(restored, "vanity-original\n");
+
+        if storage_root.exists() {
+            std::fs::remove_dir_all(storage_root).expect("storage root should be removable");
+        }
+    }
 }

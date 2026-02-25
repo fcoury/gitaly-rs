@@ -237,6 +237,8 @@ fn ensure_target_directory_or_absent(target_dir: &Path) -> Result<(), SnapshotEr
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs as unix_fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -311,6 +313,39 @@ mod tests {
             SnapshotError::TargetNotDirectory { path } => assert_eq!(path, target_file),
             other => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_snapshot_rolls_back_target_when_copy_fails_midway() {
+        let snapshot_root = TestDir::new("restore-source-rollback");
+        let target_root = TestDir::new("restore-target-rollback");
+
+        write_file(snapshot_root.path().join("new.txt"), "new");
+        unix_fs::symlink(
+            snapshot_root.path().join("new.txt"),
+            snapshot_root.path().join("unsupported-link"),
+        )
+        .expect("symlink should be creatable");
+        write_file(target_root.path().join("old.txt"), "old");
+
+        let error = restore_snapshot(snapshot_root.path(), target_root.path())
+            .expect_err("restore should fail on unsupported entry");
+        match error {
+            SnapshotError::UnsupportedEntry { path } => {
+                assert_eq!(path, snapshot_root.path().join("unsupported-link"));
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+
+        assert_eq!(
+            fs::read_to_string(target_root.path().join("old.txt")).expect("old file should exist"),
+            "old"
+        );
+        assert!(
+            !target_root.path().join("new.txt").exists(),
+            "partial copy should be removed after rollback"
+        );
     }
 
     fn write_file(path: PathBuf, contents: &str) {

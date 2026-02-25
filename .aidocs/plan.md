@@ -25,22 +25,22 @@ Last updated: 2026-02-25
 |---|---|---|---|---|
 | T08 | Close remaining Phase 8 API/tooling gaps | `service/*`, `bins/*`, tooling | done | Closed highest-impact gaps: helper binaries now functional and repository backup/restore RPCs implement real snapshot semantics |
 | T09 | Complete Phase 5 observability rollout | middleware + service surfaces | done | Structured logs, metrics, and correlation propagation now cover middleware accept/reject paths with per-reason counters |
-| T10 | Execute Phase 3 durability drills | write path + storage durability | in_progress | Crash/restart drills, fsync/atomicity checks, snapshot/restore corruption handling |
-| T11 | Run Phase 4 load/stress gate | load harness + stress profiles | pending | Saturation/soak tests with explicit pass/fail SLO thresholds |
+| T10 | Execute Phase 3 durability drills | write path + storage durability | done | Added rollback/corruption durability drills for snapshot restore and backup pointer edge cases (including vanity backup roots) |
+| T11 | Run Phase 4 load/stress gate | load harness + stress profiles | in_progress | Saturation/soak tests with explicit pass/fail SLO thresholds |
 | T12 | Deepen Phase 9 cluster implementation | `gitaly-cluster`, `service/raft.rs` | pending | Move from baseline state manager to deeper OpenRaft lifecycle and persistence |
 | T13 | Expand Phase 10 test program | `tests/*`, CI matrix, coverage | pending | Grow integration/chaos/compat/reliability suites and nightly matrix |
 
 ## Current Task Detail
 
-### T10 - Execute Phase 3 durability drills
+### T11 - Run Phase 4 load/stress gate
 
 Subtasks:
-- Add crash/restart durability drills for write-heavy repository flows.
-- Validate atomic snapshot/restore behavior under partial or corrupted backup inputs.
-- Verify WAL/commit ordering recovery behavior after interrupted write sequences.
+- Expand stress benches beyond repository-exists to include read-path and pack streaming pressure.
+- Add a repeatable stress gate runner that records throughput/latency artifacts with explicit thresholds.
+- Document load profile, pass/fail criteria, and execution workflow for local and CI usage.
 
 Verification target:
-- Focused storage + repository durability tests.
+- Focused stress benches and gate runner checks.
 - `cargo test --workspace -- --test-threads=1`
 
 ## Changelog
@@ -52,3 +52,6 @@ Verification target:
 - 2026-02-25: Completed T09 by adding shared observability field extraction, structured auth/limiter decision logging, and per-reason rejection counters wired into middleware tests.
 - 2026-02-25: Verified T09 with `cargo test -p gitaly-server --lib middleware:: -- --test-threads=1` and `cargo test --workspace -- --test-threads=1`.
 - 2026-02-25: Marked T09 complete and started T10 durability drill execution.
+- 2026-02-25: Completed T10 by adding snapshot rollback durability coverage, backup pointer corruption/missing-snapshot restore drills, and vanity backup-root round-trip coverage.
+- 2026-02-25: Verified T10 with `cargo test -p gitaly-storage snapshot::tests:: -- --test-threads=1`, `cargo test -p gitaly-server --lib service::repository::tests:: -- --test-threads=1`, and `cargo test --workspace -- --test-threads=1`.
+- 2026-02-25: Marked T10 complete and started T11 load/stress gate work.

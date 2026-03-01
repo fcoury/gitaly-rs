@@ -1,0 +1,17 @@
+listen_addr = "0.0.0.0:2305"
+internal_addr = "0.0.0.0:2305"
+
+[auth]
+token = ""
+transitioning = true
+
+[[storages]]
+name = "default"
+path = "/var/gitaly/repositories"
+
+[runtime.limiter]
+concurrency_limit = 64
+queue_limit = 8
+
+[runtime.cgroups]
+enabled = false

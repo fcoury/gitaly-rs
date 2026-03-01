@@ -1,0 +1,12 @@
+services:
+  gitaly-forge:
+    container_name: gitaly-forge
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "2305:2305"
+      - "8080:8080"
+      - "2222:2222"
+    volumes:
+      - ${GITALY_REPOSITORIES_DIR:-/Volumes/External/gitaly-workspace}:/var/gitaly/repositories
